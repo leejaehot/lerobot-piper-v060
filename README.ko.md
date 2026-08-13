@@ -51,22 +51,107 @@ scripts/                 설치, CAN 설정, teleop 및 환경 스크립트
 - `pyrealsense2`에서 지원하는 Intel RealSense 카메라
 - `iproute2`, `udev`, Git, FFmpeg
 
-## 설치
+## 환경 구성 전략
+
+로봇 하드웨어 워크스테이션에는 네이티브 Conda 설치를 권장합니다. Python
+패키지는 격리하면서도 SocketCAN, USB 권한, udev, RealSense 및 NVIDIA
+드라이버를 별도의 컨테이너 경계 없이 사용할 수 있기 때문입니다.
+
+여러 장비에서 사용자 공간 전체를 동일하게 복원해야 한다면 Docker가 유용하지만,
+Docker는 호스트 커널, `gs_usb`, udev 규칙, USB 권한 또는 NVIDIA 드라이버를
+포함하지 **않습니다**. Piper 컨테이너를 사용하더라도 호환되는 Ubuntu/JetPack
+호스트, 호스트에서의 CAN 초기화, SocketCAN 접근을 위한 `--network=host`,
+RealSense USB 장치 전달, GPU 사용 시 NVIDIA Container Toolkit이 필요합니다.
+한 대의 로봇 워크스테이션에서는 Conda로 시작하고, 같은 환경을 반복 배포해야 할
+때 플랫폼 전용 Docker 이미지를 추가하는 편이 적합합니다.
+
+이 저장소는 LeRobot을 `v0.6.0`으로, pyAgxArm을 특정 Git 커밋으로
+고정합니다. 다만 하위 pip 의존성 전체를 바이트 단위로 잠그지는 않았으므로 현재
+네이티브 설치는 완전한 환경 스냅샷이 아니라 호환 버전 범위를 고정한 구성입니다.
+
+## 설치(권장: 네이티브 Conda)
+
+### 1. Ubuntu 호스트 준비
+
+```bash
+sudo apt update
+sudo apt install -y git git-lfs can-utils iproute2 udev ffmpeg
+sudo modprobe gs_usb
+git lfs install
+```
+
+Python을 디버깅하기 전에 호스트에서 CAN 인터페이스와 RealSense 카메라가 보여야
+합니다. `gs_usb` 모듈과 장치 권한은 호스트 설정이며 Conda 환경에 설치되는
+항목이 아닙니다.
+
+### 2. Python 환경 생성
+
+`conda`가 없다면 [Miniforge](https://github.com/conda-forge/miniforge)를
+설치한 뒤 환경을 생성합니다.
+
+```bash
+conda create -y -n lerobot_v060 python=3.12
+conda activate lerobot_v060
+conda install -y -c conda-forge ffmpeg=7.1.1
+python -m pip install --upgrade pip
+```
+
+### 3. LeRobot v0.6.0 소스 설치
 
 지원되는 버전의 LeRobot과 이 저장소를 나란히 클론합니다.
 
 ```bash
 git clone --branch v0.6.0 https://github.com/huggingface/lerobot.git ~/lerobot_v060
+cd ~/lerobot_v060
+python -m pip install -e ".[core_scripts,intelrealsense]"
+```
+
+`core_scripts` extra는 데이터셋 취득, 하드웨어 및 Rerun 의존성을 설치하고,
+`intelrealsense` extra는 `pyrealsense2`를 설치합니다. 대상 Python/aarch64
+플랫폼용 `pyrealsense2` wheel이 없다면 먼저 호환 wheel을 빌드하거나 준비하여
+동일한 환경에 설치해야 합니다.
+
+### 4. Piper 통합 적용
+
+```bash
 git clone https://github.com/leejaehot/lerobot-piper-v060.git ~/piper
 
-conda activate lerobot_v060
 ~/piper/scripts/install.sh ~/lerobot_v060
 source ~/piper/scripts/activate_lerobot_v060.sh
 ```
 
 `install.sh`는 [작은 LeRobot 패치](patches/lerobot-v0.6.0-piper.patch)를
-적용하고 Piper 패키지를 editable 모드로 설치합니다. 패치가 이미 적용된
-상태에서 다시 실행해도 안전합니다.
+로컬 editable LeRobot 체크아웃에 적용하고, 이 저장소의
+`lerobot_robot_piper` 배포 패키지를 editable 모드로 설치하며, 필요한 경우
+예제에서 로컬 녹화 설정을 생성합니다. 패치가 이미 적용된 상태에서 다시 실행해도
+안전합니다.
+
+LeRobot은 이름이 `lerobot_robot_`으로 시작하는 설치된 배포 패키지를 찾아
+자동으로 import합니다. `lerobot_robot_piper`를 import하면
+`piper_follower`와 `piper_leader`가 모두 등록되므로 플러그인 소스를
+`src/lerobot` 안으로 복사할 필요가 없습니다. 두 프로젝트 모두 editable
+설치이므로 로컬 소스 수정 사항이 즉시 반영됩니다.
+
+새 터미널을 열 때마다 활성화 스크립트를 source합니다.
+
+```bash
+source ~/piper/scripts/activate_lerobot_v060.sh
+```
+
+이 스크립트는 `lerobot_v060` 환경을 활성화하고 Piper 스크립트를 `PATH`에
+추가하며, 로컬 CAN 매핑과 별도의 LeRobot 데이터 경로를 불러온 뒤 LeRobot
+체크아웃으로 이동합니다. 로봇팔을 움직이지 않고 설치를 검증하려면 다음을
+실행합니다.
+
+```bash
+python -c 'import lerobot_robot_piper, lerobot_teleoperator_piper; print("Piper plugins: OK")'
+python -m pip show lerobot lerobot_robot_piper pyAgxArm pyrealsense2
+piper_teleop --help
+piper_record --help
+```
+
+출력 경로는 관련 없는 전역 Python 설치가 아니라 editable LeRobot 체크아웃
+(`~/lerobot_v060`)과 이 저장소(`~/piper/lerobot_plugins`)를 가리켜야 합니다.
 
 ## CAN 역할 설정
 

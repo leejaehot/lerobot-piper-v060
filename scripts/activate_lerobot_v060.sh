@@ -5,14 +5,16 @@ PIPER_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PIPER_LEROBOT_ROOT="${PIPER_LEROBOT_ROOT:-$HOME/lerobot_v060}"
 PIPER_CONDA_ENV="${PIPER_CONDA_ENV:-lerobot_v060}"
 
-if ! command -v conda >/dev/null 2>&1; then
-    CONDA_SH="${PIPER_CONDA_SH:-$HOME/miniforge3/etc/profile.d/conda.sh}"
-    if [[ ! -f "$CONDA_SH" ]]; then
-        echo "ERROR: conda not found; set PIPER_CONDA_SH to conda.sh" >&2
-        return 1 2>/dev/null || exit 1
-    fi
+CONDA_SH="${PIPER_CONDA_SH:-$HOME/miniforge3/etc/profile.d/conda.sh}"
+if [[ -f "$CONDA_SH" ]]; then
+    # `conda` can be present as an executable while `conda activate` is still
+    # unavailable in non-interactive shells. Loading conda.sh is idempotent and
+    # makes this helper work from terminals, scripts, and container entrypoints.
     # shellcheck disable=SC1090
     source "$CONDA_SH"
+elif ! command -v conda >/dev/null 2>&1; then
+    echo "ERROR: conda not found; set PIPER_CONDA_SH to conda.sh" >&2
+    return 1 2>/dev/null || exit 1
 fi
 conda activate "$PIPER_CONDA_ENV"
 
