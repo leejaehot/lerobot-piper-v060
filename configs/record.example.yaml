@@ -25,6 +25,10 @@ arm:
   follower_can: can_follower
   speed_percent: 100
   max_relative_target: 100
+  # Smooth only the follower gripper; arm joints still use the full control rate.
+  gripper_speed_mm_s: 80
+  # 1..10; 5 balances hand effort and passive position holding on this setup.
+  leader_gripper_friction: 5
   gripper_input_min: 1000
   gripper_input_max: 50000
 

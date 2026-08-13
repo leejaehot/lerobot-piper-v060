@@ -40,6 +40,8 @@ class PiperFollower(Robot):
         self._terminal_loop_hz: float | None = None
         self._terminal_line_count = 0
         self._terminal_screen_active = False
+        self._last_gripper_target: float | None = None
+        self._last_action_time_s: float | None = None
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple[int, int, int]]:
@@ -70,6 +72,8 @@ class PiperFollower(Robot):
             if not self.bus.enable_torque():
                 raise RuntimeError(f"{self} failed to enable follower motors")
             self.configure()
+            self._last_gripper_target = None
+            self._last_action_time_s = None
             for camera in self.cameras.values():
                 camera.connect()
         except Exception:
@@ -124,12 +128,29 @@ class PiperFollower(Robot):
             for key, value in action.items()
             if key.endswith(".pos")
         }
+        present: dict[str, float] | None = None
         if self.config.max_relative_target is not None:
             present = self.bus.sync_read("Present_Position")
             goal = ensure_safe_goal_position(
                 {name: (value, present[name]) for name, value in goal.items()},
                 self.config.max_relative_target,
             )
+        if self.config.gripper_speed_mm_s is not None and "gripper" in goal:
+            if present is None:
+                present = self.bus.sync_read("Present_Position")
+            now = time.monotonic()
+            if self._last_gripper_target is None or self._last_action_time_s is None:
+                self._last_gripper_target = float(present["gripper"])
+                self._last_action_time_s = now
+            elapsed_s = min(max(now - self._last_action_time_s, 0.0), 0.05)
+            max_delta = self.config.gripper_speed_mm_s * elapsed_s
+            requested = float(goal["gripper"])
+            goal["gripper"] = min(
+                self._last_gripper_target + max_delta,
+                max(self._last_gripper_target - max_delta, requested),
+            )
+            self._last_gripper_target = goal["gripper"]
+            self._last_action_time_s = now
         self.bus.set_action(goal)
         return {f"{motor}.pos": value for motor, value in goal.items()}
 
@@ -222,6 +243,35 @@ class PiperFollower(Robot):
             sys.stdout.flush()
             self._terminal_screen_active = False
         self._terminal_line_count = 0
+
+    def prepare_for_disconnect(self) -> None:
+        """Keep torque on until the operator confirms both arms are supported."""
+        self.close_teleop_terminal()
+        if not (
+            self.config.disable_torque_on_disconnect
+            and self.config.wait_for_enter_on_disconnect
+        ):
+            return
+        if not sys.stdin.isatty():
+            logger.warning(
+                "%s cannot prompt on non-interactive stdin; disconnecting now",
+                self,
+            )
+            return
+
+        print("\n╭─ SAFE DISCONNECT ───────────────────────────────────╮")
+        print("│ Follower torque is still ON.                        │")
+        print("│ Support both arms, then press Enter to release it.  │")
+        print("╰─────────────────────────────────────────────────────╯")
+        while True:
+            try:
+                input("Press Enter when both arms are supported: ")
+                return
+            except KeyboardInterrupt:
+                print("\nTorque remains ON. Support both arms before disconnecting.")
+            except EOFError:
+                logger.warning("stdin closed before safe-disconnect confirmation")
+                return
 
     @check_if_not_connected
     def disconnect(self) -> None:

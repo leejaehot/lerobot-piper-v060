@@ -57,10 +57,29 @@ class PiperLeader(Teleoperator):
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         del calibrate
-        self.bus.connect()
-        self.bus.enable_fk_cal()
-        self.bus.enable_torque()
-        logger.info("%s torque on", self)
+        try:
+            self.bus.connect()
+            self.bus.enable_fk_cal()
+            self.bus.enable_torque()
+            logger.info("%s torque on", self)
+            if self.bus.configure_leader_gripper_friction(
+                self.config.gripper_teaching_friction
+            ):
+                logger.info(
+                    "%s gripper teaching friction set to %d/10",
+                    self,
+                    self.config.gripper_teaching_friction,
+                )
+            else:
+                logger.warning(
+                    "%s could not verify gripper teaching friction %d/10",
+                    self,
+                    self.config.gripper_teaching_friction,
+                )
+        except Exception:
+            if self.bus.is_connected:
+                self.bus.disconnect(disable_torque=True)
+            raise
 
     @property
     def is_calibrated(self) -> bool:

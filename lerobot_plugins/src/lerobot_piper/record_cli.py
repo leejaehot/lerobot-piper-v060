@@ -38,6 +38,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--control-fps", type=int, help="leader-to-follower control FPS")
     parser.add_argument("--speed", type=int, help="follower speed percent")
     parser.add_argument(
+        "--gripper-speed-mm-s",
+        type=float,
+        help="maximum follower gripper travel speed",
+    )
+    parser.add_argument(
+        "--leader-gripper-friction",
+        type=int,
+        help="leader gripper teaching friction (1..10)",
+    )
+    parser.add_argument(
         "--segments",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -107,6 +117,14 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
         "follower_can": os.getenv("PIPER_FOLLOWER_CAN", arm.get("follower_can", "can_follower")),
         "speed_percent": override(args.speed, arm.get("speed_percent", 100)),
         "max_relative_target": arm.get("max_relative_target", 100),
+        "gripper_speed_mm_s": override(
+            args.gripper_speed_mm_s,
+            arm.get("gripper_speed_mm_s", 80),
+        ),
+        "leader_gripper_friction": override(
+            args.leader_gripper_friction,
+            arm.get("leader_gripper_friction", 5),
+        ),
         "gripper_input_min": arm.get("gripper_input_min", 1_000),
         "gripper_input_max": arm.get("gripper_input_max", 50_000),
         "segments": annotations.get("segments", True)
@@ -140,6 +158,10 @@ def _validate(cfg: dict[str, Any]) -> None:
         raise ValueError("control_fps must be at least dataset_fps")
     if not 1 <= int(cfg["speed_percent"]) <= 100:
         raise ValueError("speed_percent must be between 1 and 100")
+    if float(cfg["gripper_speed_mm_s"]) <= 0:
+        raise ValueError("gripper_speed_mm_s must be positive")
+    if not 1 <= int(cfg["leader_gripper_friction"]) <= 10:
+        raise ValueError("leader_gripper_friction must be between 1 and 10")
     if int(cfg["segment_debounce_ms"]) < 0:
         raise ValueError("segment_debounce_ms must be non-negative")
     cameras = cfg["cameras"]
@@ -167,6 +189,21 @@ def _preflight(cfg: dict[str, Any]) -> None:
     ]
     if missing_can:
         raise RuntimeError(f"Missing CAN interface(s): {', '.join(missing_can)}; run with --init-can")
+    unhealthy_can = []
+    for name in (cfg["leader_can"], cfg["follower_can"]):
+        status = subprocess.run(
+            ["ip", "-details", "link", "show", str(name)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if status.returncode != 0 or "can state ERROR-ACTIVE" not in status.stdout:
+            unhealthy_can.append(str(name))
+    if unhealthy_can:
+        raise RuntimeError(
+            f"Unhealthy CAN interface(s): {', '.join(unhealthy_can)}; stop other Piper processes "
+            "and retry with --init-can"
+        )
     detected = _usb_realsense_count()
     expected = len(cfg["cameras"])
     if detected < expected:
@@ -197,6 +234,13 @@ def _plan(cfg: dict[str, Any], *, test: bool) -> None:
     rows += _line(
         "CONTROL",
         f"{cfg['control_fps']} Hz  ·  dataset {cfg['dataset_fps']} Hz  ·  speed {cfg['speed_percent']}%",
+    )
+    rows += _line(
+        "GRIPPER",
+        (
+            f"follower {cfg['gripper_speed_mm_s']:g} mm/s"
+            f"  ·  leader friction {cfg['leader_gripper_friction']}/10"
+        ),
     )
     rows += _line(
         "PEDALS",
@@ -269,6 +313,7 @@ def _record_config(cfg: dict[str, Any]):
             cameras=cameras,
             speed_percent=int(cfg["speed_percent"]),
             max_relative_target=float(cfg["max_relative_target"]),
+            gripper_speed_mm_s=float(cfg["gripper_speed_mm_s"]),
             terminal_update_hz=0,
         ),
         teleop=PiperLeaderConfig(
@@ -276,6 +321,7 @@ def _record_config(cfg: dict[str, Any]):
             port=str(cfg["leader_can"]),
             gripper_input_min=int(cfg["gripper_input_min"]),
             gripper_input_max=int(cfg["gripper_input_max"]),
+            gripper_teaching_friction=int(cfg["leader_gripper_friction"]),
         ),
         dataset=DatasetRecordConfig(
             repo_id=str(cfg["repo_id"]),
@@ -306,6 +352,8 @@ def _failure_hint(message: str) -> str | None:
         return "Close RealSense Viewer/other camera processes, reconnect the camera hub, then retry directly."
     if "failed to enable follower" in lower:
         return "Release the E-stop, power-cycle the follower controller, then retry."
+    if "unhealthy can" in lower:
+        return "Reinitialize CAN; if it is still not ERROR-ACTIVE, power-cycle the affected arm controller."
     if "already exists" in lower:
         return "Use a different --repo-id; each recording receives a timestamp but same-second retries can collide."
     return None
