@@ -1,5 +1,7 @@
 # LeRobot Piper v0.6.0
 
+**English** | [한국어](README.ko.md)
+
 AgileX Piper leader/follower teleoperation and synchronized dual-RealSense
 dataset recording for [LeRobot 0.6.0](https://github.com/huggingface/lerobot/tree/v0.6.0).
 
