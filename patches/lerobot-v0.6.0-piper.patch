@@ -36,7 +36,7 @@ index 29cb1e5e..797068ce 100644
 
          for device in devices:
 diff --git a/src/lerobot/scripts/lerobot_record.py b/src/lerobot/scripts/lerobot_record.py
-index 4233f0bc..dfb8293f 100644
+index 4233f0bc..e4474f00 100644
 --- a/src/lerobot/scripts/lerobot_record.py
 +++ b/src/lerobot/scripts/lerobot_record.py
 @@ -93,6 +93,9 @@ import logging
@@ -476,8 +476,18 @@ index 4233f0bc..dfb8293f 100644
                      )
 
                  if events["rerecord_episode"]:
+@@ -521,6 +807,9 @@ def record(
+             dataset.finalize()
+
+         if robot.is_connected:
++            prepare_disconnect = getattr(robot, "prepare_for_disconnect", None)
++            if callable(prepare_disconnect):
++                prepare_disconnect()
+             robot.disconnect()
+         if teleop and teleop.is_connected:
+             teleop.disconnect()
 diff --git a/src/lerobot/scripts/lerobot_teleoperate.py b/src/lerobot/scripts/lerobot_teleoperate.py
-index 30f13987..81b7e4cd 100644
+index 30f13987..10f640f8 100644
 --- a/src/lerobot/scripts/lerobot_teleoperate.py
 +++ b/src/lerobot/scripts/lerobot_teleoperate.py
 @@ -70,6 +70,8 @@ lerobot-teleoperate \
@@ -520,7 +530,7 @@ index 30f13987..81b7e4cd 100644
      logging.info(pformat(asdict(cfg)))
      if cfg.display_data:
          init_visualization(
-@@ -274,6 +287,9 @@ def teleoperate(cfg: TeleoperateConfig):
+@@ -274,8 +287,14 @@ def teleoperate(cfg: TeleoperateConfig):
      except KeyboardInterrupt:
          pass
      finally:
@@ -529,7 +539,12 @@ index 30f13987..81b7e4cd 100644
 +            close_terminal()
          if cfg.display_data:
              shutdown_visualization(cfg.display_mode)
++        prepare_disconnect = getattr(robot, "prepare_for_disconnect", None)
++        if robot.is_connected and callable(prepare_disconnect):
++            prepare_disconnect()
          teleop.disconnect()
+         robot.disconnect()
+
 diff --git a/src/lerobot/utils/keyboard_input.py b/src/lerobot/utils/keyboard_input.py
 index 00c0f53e..9767f1f2 100644
 --- a/src/lerobot/utils/keyboard_input.py
@@ -610,7 +625,7 @@ index 00c0f53e..9767f1f2 100644
 +    listener = create_key_listener(on_key, controls_help=controls_help)
      return listener, events
 diff --git a/tests/test_control_robot.py b/tests/test_control_robot.py
-index dd10c0c1..d76d1f00 100644
+index dd10c0c1..6a8ca953 100644
 --- a/tests/test_control_robot.py
 +++ b/tests/test_control_robot.py
 @@ -14,6 +14,7 @@
@@ -630,10 +645,36 @@ index dd10c0c1..d76d1f00 100644
  from tests.mocks.mock_teleop import MockTeleopConfig
 
 
-@@ -48,6 +49,95 @@ def test_teleoperate():
+@@ -48,6 +49,156 @@ def test_teleoperate():
      teleoperate(cfg)
 
 
++def test_teleoperate_prepares_robot_before_disconnect():
++    events: list[str] = []
++    original_disconnect = MockRobot.disconnect
++
++    def prepare_for_disconnect(self):
++        assert self.is_connected
++        events.append("prepare")
++
++    def disconnect(self):
++        events.append("disconnect")
++        return original_disconnect(self)
++
++    cfg = TeleoperateConfig(
++        robot=MockRobotConfig(),
++        teleop=MockTeleopConfig(),
++        teleop_time_s=0.05,
++    )
++    with (
++        patch.object(MockRobot, "prepare_for_disconnect", prepare_for_disconnect, create=True),
++        patch.object(MockRobot, "disconnect", disconnect),
++    ):
++        teleoperate(cfg)
++
++    assert events == ["prepare", "disconnect"]
++
++
 +def test_record_decouples_control_rate_from_dataset_rate(tmp_path):
 +    robot_cfg = MockRobotConfig()
 +    teleop_cfg = MockTeleopConfig()
@@ -667,6 +708,41 @@ index dd10c0c1..d76d1f00 100644
 +
 +    assert dataset.num_frames == 3
 +    assert send_count > dataset.num_frames
++
++
++def test_record_prepares_robot_before_disconnect(tmp_path):
++    events: list[str] = []
++    original_disconnect = MockRobot.disconnect
++
++    def prepare_for_disconnect(self):
++        assert self.is_connected
++        events.append("prepare")
++
++    def disconnect(self):
++        events.append("disconnect")
++        return original_disconnect(self)
++
++    cfg = RecordConfig(
++        robot=MockRobotConfig(),
++        teleop=MockTeleopConfig(),
++        dataset=DatasetRecordConfig(
++            repo_id=DUMMY_REPO_ID,
++            single_task="Dummy task",
++            root=tmp_path / "record_safe_disconnect",
++            fps=30,
++            num_episodes=1,
++            episode_time_s=0.05,
++            push_to_hub=False,
++        ),
++        play_sounds=False,
++    )
++    with (
++        patch.object(MockRobot, "prepare_for_disconnect", prepare_for_disconnect, create=True),
++        patch.object(MockRobot, "disconnect", disconnect),
++    ):
++        record(cfg)
++
++    assert events == ["prepare", "disconnect"]
 +
 +
 +def test_record_writes_dense_foot_pedal_segment_ids(tmp_path):

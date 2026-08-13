@@ -185,6 +185,26 @@ piper_teleop
 전체 화면 터미널 대시보드에는 리더 목표값, 팔로워 qpos, 관절 추종 오차,
 그리퍼 위치, 플랜지 자세 및 제어 루프 속도가 표시됩니다.
 
+리더 그리퍼는 기본 teaching friction `5`를 사용합니다. 이 장비에서는 손으로
+조작하는 힘과 손을 놓았을 때의 위치 유지력을 절충한 값입니다. 팔로워
+그리퍼에만 `80 mm/s` 속도 제한이 적용되어 리더 입력이 급격해도 부드럽게
+따라가며 팔 관절의 200 Hz 제어에는 영향을 주지 않습니다. 필요하면 다음
+환경 변수로 조정합니다.
+
+```bash
+PIPER_LEADER_GRIPPER_FRICTION=4 \
+PIPER_TELEOP_GRIPPER_SPEED_MM_S=60 \
+piper_teleop
+```
+
+friction 값은 `1~10`이며 높을수록 손힘은 줄지만 자연스럽게 벌어질 가능성이
+커집니다. 이 장비에서는 `4~6` 범위를 권장합니다.
+
+`Ctrl-C`로 종료하면 토크를 바로 끄지 않고 safe-disconnect 안내를 표시합니다.
+두 팔, 특히 follower를 손으로 지지한 뒤 Enter를 눌러야 토크가 해제되고 CAN이
+disconnect됩니다. 파이프나 cron처럼 stdin이 터미널이 아닌 실행에서는 확인을
+기다릴 수 없으므로 경고 후 기존처럼 종료합니다.
+
 ## 데이터 취득 설정
 
 로컬 설정 파일을 만들고 두 RealSense 시리얼 번호를 실제 값으로 교체합니다.
@@ -213,6 +233,15 @@ cameras:
 ```bash
 piper_record --init-can --test
 piper_record
+```
+
+recording에서도 동일한 safe-disconnect Enter 확인과 그리퍼 설정이 적용됩니다.
+로컬 `configs/record.yaml`의 `arm` 항목에서 다음 값을 조정할 수 있습니다.
+
+```yaml
+arm:
+  gripper_speed_mm_s: 80
+  leader_gripper_friction: 5
 ```
 
 ### 3발판 데이터 취득 제어

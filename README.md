@@ -185,6 +185,25 @@ piper_teleop
 The full-screen terminal dashboard displays leader target, follower qpos,
 joint tracking error, gripper position, flange pose, and control-loop rate.
 
+The leader gripper defaults to teaching friction `5`, a balance between hand
+effort and passive position holding on this hardware. A follower-only
+`80 mm/s` slew limit smooths sudden gripper input without reducing the 200 Hz
+arm-joint control rate. Override either value when needed:
+
+```bash
+PIPER_LEADER_GRIPPER_FRICTION=4 \
+PIPER_TELEOP_GRIPPER_SPEED_MM_S=60 \
+piper_teleop
+```
+
+Friction accepts `1..10`. Higher values require less hand force but are more
+likely to drift open; `4..6` is recommended for this setup.
+
+After `Ctrl-C`, torque remains on while a safe-disconnect prompt is shown.
+Support both arms—especially the follower—then press Enter to release torque
+and disconnect CAN. Non-interactive runs such as pipes or cron cannot wait for
+confirmation, so they log a warning and retain the previous shutdown behavior.
+
 ## Configure recording
 
 Create the local configuration and replace the two RealSense serials:
@@ -213,6 +232,15 @@ Run a five-second validation before collecting a real dataset:
 ```bash
 piper_record --init-can --test
 piper_record
+```
+
+Recording uses the same safe-disconnect Enter confirmation and gripper
+defaults. Adjust them in the local `configs/record.yaml` when necessary:
+
+```yaml
+arm:
+  gripper_speed_mm_s: 80
+  leader_gripper_friction: 5
 ```
 
 ### Three-pedal recording controls

@@ -121,6 +121,30 @@ class PiperMotorsBus:
         del motors, num_retry
         self._driver.disable()
 
+    def configure_leader_gripper_friction(self, teaching_friction: int) -> bool:
+        """Set leader gripper teaching friction while preserving other parameters."""
+        current = self._gripper.get_gripper_teaching_pendant_param(
+            timeout=1.0,
+            min_interval=0.0,
+        )
+        if current is None:
+            return False
+        if int(current.msg.teaching_friction) == teaching_friction:
+            return True
+
+        teaching_range_per = int(current.msg.teaching_range_per)
+        max_range_config = float(current.msg.max_range_config)
+        if max_range_config not in {0.0, 0.07, 0.1}:
+            return False
+        return bool(
+            self._gripper.set_gripper_teaching_pendant_param(
+                teaching_range_per=teaching_range_per,
+                max_range_config=max_range_config,
+                teaching_friction=teaching_friction,
+                timeout=1.0,
+            )
+        )
+
     def _normalize(self, values: dict[str, float]) -> dict[str, float]:
         normalized: dict[str, float] = {}
         for name, value in values.items():

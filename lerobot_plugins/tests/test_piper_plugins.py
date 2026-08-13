@@ -20,13 +20,48 @@ class FakeGripper:
         self.driver = driver
 
     def get_gripper_ctrl_states(self) -> SimpleNamespace:
-        return SimpleNamespace(msg=SimpleNamespace(value=self.driver.leader_gripper_m))
+        return SimpleNamespace(
+            msg=SimpleNamespace(value=self.driver.leader_gripper_m),
+        )
 
     def get_gripper_status(self) -> SimpleNamespace:
-        return SimpleNamespace(msg=SimpleNamespace(value=self.driver.follower_gripper_m))
+        return SimpleNamespace(
+            msg=SimpleNamespace(value=self.driver.follower_gripper_m),
+        )
 
     def move_gripper_m(self, value: float, force: float) -> None:
         self.driver.gripper_commands.append((value, force))
+
+    def get_gripper_teaching_pendant_param(
+        self,
+        *,
+        timeout: float,
+        min_interval: float,
+    ) -> SimpleNamespace:
+        assert timeout == 1.0
+        assert min_interval == 0.0
+        return SimpleNamespace(
+            msg=SimpleNamespace(
+                teaching_range_per=self.driver.gripper_teaching_range_per,
+                max_range_config=self.driver.gripper_max_range_config,
+                teaching_friction=self.driver.gripper_teaching_friction,
+            )
+        )
+
+    def set_gripper_teaching_pendant_param(
+        self,
+        *,
+        teaching_range_per: int,
+        max_range_config: float,
+        teaching_friction: int,
+        timeout: float,
+    ) -> bool:
+        assert timeout == 1.0
+        self.driver.gripper_teaching_range_per = teaching_range_per
+        self.driver.gripper_max_range_config = max_range_config
+        self.driver.gripper_teaching_friction = teaching_friction
+        self.driver.calls.append(f"gripper_friction:{teaching_friction}")
+        return True
 
 
 class FakePyAgxArm:
@@ -46,6 +81,9 @@ class FakePyAgxArm:
         self.flange_pose = [0.3, 0.1, 0.2, 0.01, 0.02, 0.03]
         self.joint_commands: list[list[float]] = []
         self.gripper_commands: list[tuple[float, float]] = []
+        self.gripper_teaching_range_per = 125
+        self.gripper_max_range_config = 0.1
+        self.gripper_teaching_friction = 1
 
     def init_effector(self, effector: str) -> FakeGripper:
         assert effector == "agx_gripper"
@@ -132,7 +170,7 @@ def test_normalization_matches_v043_ranges() -> None:
     assert bus._unnormalize(bus._normalize(raw_midpoints)) == pytest.approx(raw_midpoints)
 
 
-def test_leader_connect_is_v043_flow_without_role_or_freshness_gate(
+def test_leader_connect_configures_balanced_gripper_friction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("lerobot_piper.piper.time.sleep", lambda _: None)
@@ -146,6 +184,10 @@ def test_leader_connect_is_v043_flow_without_role_or_freshness_gate(
 
     assert driver.calls[0:2] == ["init_gripper", "connect"]
     assert driver.calls.count("enable") == 3
+    assert driver.calls.count("gripper_friction:5") == 1
+    assert driver.gripper_teaching_range_per == 125
+    assert driver.gripper_max_range_config == 0.1
+    assert driver.gripper_teaching_friction == 5
     assert "set_leader" not in driver.calls
     assert not hasattr(leader.bus, "wait_for_sample")
     assert leader.get_action() == pytest.approx(
@@ -154,6 +196,22 @@ def test_leader_connect_is_v043_flow_without_role_or_freshness_gate(
 
     leader.disconnect()
     assert driver.calls[-2:] == ["disable", "disconnect"]
+
+
+def test_leader_does_not_rewrite_matching_gripper_friction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("lerobot_piper.piper.time.sleep", lambda _: None)
+    driver = FakePyAgxArm()
+    driver.gripper_teaching_friction = 5
+    leader = PiperLeader(
+        PiperLeaderConfig(id="leader", port="can_leader"),
+        driver_factory=lambda _: driver,
+    )
+
+    leader.connect()
+
+    assert all(not call.startswith("gripper_friction:") for call in driver.calls)
 
 
 def test_enable_repeats_exactly_like_v043(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,6 +247,7 @@ def test_follower_enables_reads_and_sends_with_v060_safety_clamp(
             cameras={},
             max_relative_target=2.0,
             speed_percent=30,
+            gripper_speed_mm_s=None,
         ),
         driver_factory=lambda _: driver,
     )
@@ -290,19 +349,91 @@ def test_terminal_dashboard_uses_and_restores_alternate_screen(
     assert not follower._terminal_screen_active
 
 
+def test_follower_gripper_uses_time_based_smoothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = iter((10.0, 10.01, 10.11))
+    monkeypatch.setattr(
+        "lerobot_robot_piper.piper_follower.time.monotonic",
+        lambda: next(ticks),
+    )
+    driver = FakePyAgxArm()
+    follower = PiperFollower(
+        PiperFollowerConfig(
+            port="can_follower",
+            cameras={},
+            max_relative_target=100.0,
+            gripper_speed_mm_s=80.0,
+        ),
+        driver_factory=lambda _: driver,
+    )
+    follower.connect()
+    action = {name: 0.0 for name in follower.action_features}
+    action["gripper.pos"] = 100.0
+
+    first = follower.send_action(action)
+    second = follower.send_action(action)
+    third = follower.send_action(action)
+
+    assert first["gripper.pos"] == pytest.approx(50.0)
+    assert second["gripper.pos"] == pytest.approx(50.8)
+    # A stalled loop is capped to a 50 ms smoothing step, avoiding a jump.
+    assert third["gripper.pos"] == pytest.approx(54.8)
+
+
+def test_safe_disconnect_waits_for_enter_before_torque_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeInput:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        "lerobot_robot_piper.piper_follower.sys.stdin",
+        FakeInput(),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt: prompts.append(prompt) or "",
+    )
+    driver = FakePyAgxArm()
+    follower = PiperFollower(
+        PiperFollowerConfig(port="can_follower", cameras={}),
+        driver_factory=lambda _: driver,
+    )
+    follower.connect()
+
+    follower.prepare_for_disconnect()
+
+    assert prompts == ["Press Enter when both arms are supported: "]
+    assert "disable" not in driver.calls
+    assert follower.is_connected
+
+    follower.disconnect()
+    assert driver.calls[-2:] == ["disable", "disconnect"]
+
+
 def test_config_validation() -> None:
     with pytest.raises(ValueError, match="greater than"):
         PiperLeaderConfig(port="can_leader", gripper_input_min=10, gripper_input_max=10)
+    with pytest.raises(ValueError, match="gripper_teaching_friction"):
+        PiperLeaderConfig(port="can_leader", gripper_teaching_friction=0)
     with pytest.raises(ValueError, match="speed_percent"):
         PiperFollowerConfig(port="can_follower", speed_percent=101)
     with pytest.raises(ValueError, match="terminal_update_hz"):
         PiperFollowerConfig(port="can_follower", terminal_update_hz=-1)
+    with pytest.raises(ValueError, match="gripper_speed_mm_s"):
+        PiperFollowerConfig(port="can_follower", gripper_speed_mm_s=0)
 
 
 def test_responsive_defaults() -> None:
     config = PiperFollowerConfig(port="can_follower")
     assert config.max_relative_target == 100.0
     assert config.speed_percent == 100
+    assert config.gripper_speed_mm_s == 80.0
+    assert config.wait_for_enter_on_disconnect is True
     assert config.terminal_update_hz == 30.0
 
 
@@ -357,6 +488,8 @@ def test_piper_record_enables_foot_pedal_segments_by_default() -> None:
         dataset_fps=None,
         control_fps=None,
         speed=None,
+        gripper_speed_mm_s=None,
+        leader_gripper_friction=None,
         rerun=None,
         segments=None,
         segment_debounce_ms=None,
@@ -372,6 +505,8 @@ def test_piper_record_enables_foot_pedal_segments_by_default() -> None:
 
     assert cfg["segments"] is True
     assert cfg["segment_debounce_ms"] == 400
+    assert cfg["gripper_speed_mm_s"] == 80
+    assert cfg["leader_gripper_friction"] == 5
 
 
 def test_space_pedal_latches_one_debounced_segment_boundary(
