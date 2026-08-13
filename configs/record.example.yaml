@@ -28,6 +28,11 @@ arm:
   gripper_input_min: 1000
   gripper_input_max: 50000
 
+# Three-pedal HID keyboard: Left Arrow / Space (next segment) / Right Arrow
+annotations:
+  segments: true
+  segment_debounce_ms: 400
+
 video:
   codec: h264
   preset: veryfast

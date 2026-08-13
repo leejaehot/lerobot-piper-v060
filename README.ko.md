@@ -215,6 +215,45 @@ piper_record --init-can --test
 piper_record
 ```
 
+### 3발판 데이터 취득 제어
+
+USB HID 발판이 다음 키보드 키를 출력하도록 매핑되어 있다면 별도 드라이버 없이
+사용할 수 있습니다.
+
+| 발판 | HID 키 | 데이터 취득 동작 |
+| --- | --- | --- |
+| 왼쪽 | 왼쪽 방향키 | 현재 take를 폐기하고 같은 episode를 다시 녹화 |
+| 가운데 | Space | 다음 프레임부터 새로운 sub-task segment 시작 |
+| 오른쪽 | 오른쪽 방향키 | 현재 take를 저장하고 다음 episode로 진행 |
+
+오른쪽 발판은 현재 진행 단계를 끝냅니다. 녹화 중 한 번 누르면 reset 단계로
+들어가며, 물체와 환경을 재배치한 후 다시 누르면 reset timer를 기다리지 않고 다음
+episode를 즉시 시작합니다. 왼쪽 발판도 먼저 reset 단계로 들어간 뒤 현재 take를
+폐기하고 같은 episode 번호를 다시 사용합니다.
+
+Segment annotation은 기본으로 활성화됩니다. 모든 dataset row에는 dense scalar
+`annotation.segment_id` 열이 포함됩니다. Episode는 segment `0`으로 시작하고,
+Space를 누를 때마다 그다음 frame부터 모든 후속 frame이 `1`, `2`, `3` 순서의
+값을 가집니다. 새로운 값이 처음 나타나는 frame이 정확한 segment 경계입니다.
+다음 episode에서는 다시 `0`부터 시작합니다. 발판 입력은 직후의 다음 30 Hz
+dataset frame에 적용되며, 독립적인 200 Hz 로봇팔 제어 루프에는 영향을 주지
+않습니다. Reset 구간의 입력은 무시되고, 재녹화할 때 해당 take의 segment를
+다른 frame과 함께 폐기한 뒤 번호도 다시 `0`부터 시작합니다.
+
+키보드 자동 반복 입력은 설정 가능한 debounce 시간으로 차단합니다.
+
+```yaml
+annotations:
+  segments: true
+  segment_debounce_ms: 400
+```
+
+Annotation 열 없이 취득하려면 `piper_record --no-segments`를 사용합니다.
+X11에서는 `pynput` listener가 HID 발판을 전역으로 수신합니다. Wayland 또는
+headless terminal에서는 TTY fallback이 키를 받을 수 있도록 녹화 terminal에
+focus를 유지해야 합니다. 전체 녹화를 중지하는 키는 기존과 동일하게 `Esc` 또는
+`q`입니다.
+
 30 Hz로 정상 동작한 스모크 테스트는 다음과 비슷한 결과로 끝납니다.
 
 ```text
@@ -256,5 +295,6 @@ HF_LEROBOT_HOME=/tmp/lerobot-test-data \
 pytest -q ~/piper/lerobot_plugins/tests ~/lerobot_v060/tests/test_control_robot.py
 ```
 
-현재 통합 테스트는 고속 제어, 플러그인 시작 순서, 카메라 샘플링, 터미널 UI,
-데이터 취득 및 이어받기 경로를 포함한 16개 테스트를 통과합니다.
+현재 통합 테스트는 고속 제어, 발판 segment, 플러그인 시작 순서, 카메라
+샘플링, 터미널 UI, 데이터 취득 및 이어받기 경로를 포함한 19개 테스트를
+통과합니다.

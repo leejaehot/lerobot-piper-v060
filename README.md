@@ -215,6 +215,45 @@ piper_record --init-can --test
 piper_record
 ```
 
+### Three-pedal recording controls
+
+A USB HID foot pedal can be used without a custom driver when it emits the
+following keyboard keys:
+
+| Pedal | HID key | Recording action |
+| --- | --- | --- |
+| Left | Left Arrow | Discard the current take and re-record the same episode |
+| Middle | Space | Start the next sub-task segment at the next frame |
+| Right | Right Arrow | Save the current take and continue to the next episode |
+
+The Right pedal ends the current phase. Press it once while recording to enter
+the reset phase, reposition the scene, then press it again to start the next
+episode immediately instead of waiting for the reset timer. A Left press also
+enters reset first, then discards the take and reuses the same episode number.
+
+Segment annotation is enabled by default. Every dataset row contains the dense
+scalar `annotation.segment_id` column. An episode starts in segment `0`; after
+successive Space presses, all following frames hold `1`, `2`, `3`, and so on.
+The first frame with a new value is the exact segment boundary. IDs restart at
+`0` for every episode. A boundary is attached to the next 30 Hz dataset frame
+after the pedal press and does not alter the independent 200 Hz arm-control
+loop. Presses during reset are ignored, and re-recording discards the take's
+segments and restarts their numbering.
+
+Keyboard auto-repeat is filtered by a configurable debounce interval:
+
+```yaml
+annotations:
+  segments: true
+  segment_debounce_ms: 400
+```
+
+Use `piper_record --no-segments` to record a dataset without the annotation
+column. Under X11 the `pynput` listener receives the HID pedal globally. Under
+Wayland or a headless terminal, keep the recording terminal focused so the TTY
+fallback receives the keys. `Esc` or `q` still stops the full recording
+session.
+
 A successful smoke test at 30 Hz ends with approximately:
 
 ```text
@@ -256,5 +295,6 @@ HF_LEROBOT_HOME=/tmp/lerobot-test-data \
 pytest -q ~/piper/lerobot_plugins/tests ~/lerobot_v060/tests/test_control_robot.py
 ```
 
-The current integration test suite passes 16 tests, including high-rate control,
-plugin startup flow, camera sampling, terminal UI, recording, and resume paths.
+The current integration test suite passes 19 tests, including high-rate control,
+foot-pedal segments, plugin startup flow, camera sampling, terminal UI,
+recording, and resume paths.

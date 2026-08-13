@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from lerobot.utils import keyboard_input
 from lerobot_piper import PIPER_CALIBRATION, PiperMotorsBus
 from lerobot_piper.console_ui import recording_log_style
+from lerobot_piper.record_cli import _effective
 from lerobot_robot_piper import PiperFollower, PiperFollowerConfig
 from lerobot_teleoperator_piper import PiperLeader, PiperLeaderConfig
 
@@ -322,6 +324,15 @@ def test_recording_log_style_marks_phases_and_restores_factory() -> None:
             (),
             None,
         )
+        segment = factory(
+            "test",
+            logging.INFO,
+            __file__,
+            1,
+            "SEGMENT %d      Episode %d · starts at frame %d · %.2f s",
+            (3, 2, 45, 1.5),
+            None,
+        )
 
         assert "Episode 1/3" in recording.getMessage()
         assert "\033[" in recording.getMessage()
@@ -329,8 +340,75 @@ def test_recording_log_style_marks_phases_and_restores_factory() -> None:
         assert socket.levelno == logging.DEBUG
         assert "\033[" in warning.getMessage()
         assert "\033[1;32m" in capture.getMessage()
+        assert "◆ SEGMENT 3" in segment.getMessage()
+        assert "\033[1;35m" in segment.getMessage()
 
     assert logging.getLogRecordFactory() is original
+
+
+def test_piper_record_enables_foot_pedal_segments_by_default() -> None:
+    args = SimpleNamespace(
+        repo_id=None,
+        task=None,
+        episodes=None,
+        seconds=None,
+        reset_seconds=None,
+        push_to_hub=None,
+        dataset_fps=None,
+        control_fps=None,
+        speed=None,
+        rerun=None,
+        segments=None,
+        segment_debounce_ms=None,
+        test=False,
+    )
+    cfg = _effective(
+        {
+            "dataset": {"task": "Test pedal recording"},
+            "cameras": {"overview": "123456"},
+        },
+        args,
+    )
+
+    assert cfg["segments"] is True
+    assert cfg["segment_debounce_ms"] == 400
+
+
+def test_space_pedal_latches_one_debounced_segment_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_create_key_listener(dispatch, *, controls_help: str):
+        captured["dispatch"] = dispatch
+        captured["help"] = controls_help
+        return SimpleNamespace(stop=lambda: None)
+
+    ticks = iter((10.0, 10.1, 10.5, 10.6))
+    monkeypatch.setattr(keyboard_input, "create_key_listener", fake_create_key_listener)
+    monkeypatch.setattr(keyboard_input.time, "monotonic", lambda: next(ticks))
+
+    _, events = keyboard_input.init_keyboard_listener(
+        enable_segments=True,
+        segment_debounce_s=0.4,
+    )
+    dispatch = captured["dispatch"]
+    events["recording_active"] = True
+
+    dispatch("space")
+    assert events["segment_boundary_requested"].is_set()
+    events["segment_boundary_requested"].clear()
+
+    dispatch("space")
+    assert not events["segment_boundary_requested"].is_set()
+    dispatch("space")
+    assert events["segment_boundary_requested"].is_set()
+
+    events["segment_boundary_requested"].clear()
+    events["recording_active"] = False
+    dispatch("space")
+    assert not events["segment_boundary_requested"].is_set()
+    assert "Space=next segment" in captured["help"]
 
 
 def test_two_camera_observation_uses_nonblocking_latest_frames() -> None:

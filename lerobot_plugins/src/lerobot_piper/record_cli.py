@@ -37,6 +37,17 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--dataset-fps", type=int, help="camera and dataset FPS")
     parser.add_argument("--control-fps", type=int, help="leader-to-follower control FPS")
     parser.add_argument("--speed", type=int, help="follower speed percent")
+    parser.add_argument(
+        "--segments",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="store dense Space-pedal sub-task IDs in annotation.segment_id",
+    )
+    parser.add_argument(
+        "--segment-debounce-ms",
+        type=int,
+        help="minimum interval between accepted segment-boundary presses",
+    )
     parser.add_argument("--rerun", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--push-to-hub", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--yes", "-y", action="store_true", help="start without the confirmation prompt")
@@ -70,6 +81,7 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
     arm = _section(data, "arm")
     video = _section(data, "video")
     cameras = _section(data, "cameras")
+    annotations = _section(data, "annotations")
 
     def override(value: Any, fallback: Any) -> Any:
         return fallback if value is None else value
@@ -97,6 +109,13 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
         "max_relative_target": arm.get("max_relative_target", 100),
         "gripper_input_min": arm.get("gripper_input_min", 1_000),
         "gripper_input_max": arm.get("gripper_input_max", 50_000),
+        "segments": annotations.get("segments", True)
+        if args.segments is None
+        else args.segments,
+        "segment_debounce_ms": override(
+            args.segment_debounce_ms,
+            annotations.get("segment_debounce_ms", 400),
+        ),
         "video": video,
     }
     if args.test:
@@ -121,6 +140,8 @@ def _validate(cfg: dict[str, Any]) -> None:
         raise ValueError("control_fps must be at least dataset_fps")
     if not 1 <= int(cfg["speed_percent"]) <= 100:
         raise ValueError("speed_percent must be between 1 and 100")
+    if int(cfg["segment_debounce_ms"]) < 0:
+        raise ValueError("segment_debounce_ms must be non-negative")
     cameras = cfg["cameras"]
     if not cameras or any(not str(serial).isdigit() for serial in cameras.values()):
         raise ValueError("cameras must map readable names to numeric RealSense SDK serials")
@@ -176,6 +197,12 @@ def _plan(cfg: dict[str, Any], *, test: bool) -> None:
     rows += _line(
         "CONTROL",
         f"{cfg['control_fps']} Hz  ·  dataset {cfg['dataset_fps']} Hz  ·  speed {cfg['speed_percent']}%",
+    )
+    rows += _line(
+        "PEDALS",
+        "← re-record  ·  Space next segment  ·  → next episode"
+        if cfg["segments"]
+        else "← re-record  ·  → next episode  ·  segments OFF",
     )
     rows += _line("OUTPUT", str(output_hint))
     rows += _line(
@@ -267,6 +294,8 @@ def _record_config(cfg: dict[str, Any]):
         display_mode="rerun",
         display_fps=float(cfg["rerun_fps"]),
         display_compressed_images=bool(cfg["rerun_compress_images"]),
+        segment_annotation=bool(cfg["segments"]),
+        segment_debounce_s=float(cfg["segment_debounce_ms"]) / 1_000,
         play_sounds=False,
     )
 

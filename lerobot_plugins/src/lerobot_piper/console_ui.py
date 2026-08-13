@@ -89,6 +89,18 @@ def recording_log_style(
             _replace_message(record, paint(message, "red", bold=True, enabled=enabled))
             return record
 
+        segment = re.fullmatch(
+            r"SEGMENT (\d+)\s+Episode (\d+) · starts at frame (\d+) · ([\d.]+) s",
+            message,
+        )
+        if segment:
+            message = (
+                f"◆ SEGMENT {segment.group(1)}   Episode {segment.group(2)} · "
+                f"starts at frame {segment.group(3)} · {segment.group(4)} s"
+            )
+            _replace_message(record, paint(message, "magenta", bold=True, enabled=enabled))
+            return record
+
         transitions = {
             "Reset the environment": ("◆ RESET       Reposition the object and arm", "cyan"),
             "Re-record episode": ("↻ RE-RECORD   Discarding the current take", "magenta"),
