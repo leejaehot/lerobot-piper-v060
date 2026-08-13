@@ -4,8 +4,8 @@ index 29cb1e5e..797068ce 100644
 +++ b/src/lerobot/cameras/realsense/camera_realsense.py
 @@ -45,6 +45,14 @@ logger = logging.getLogger(__name__)
  pkg_name = "pyrealsense2-macosx" if sys.platform == "darwin" else "pyrealsense2"
- 
- 
+
+
 +def _make_isolated_rs_context():
 +    """Create a context independent of mutable RealSense Viewer settings."""
 +    # Older viewers can persist `"context": ""` in ~/.realsense-config.json,
@@ -20,12 +20,12 @@ index 29cb1e5e..797068ce 100644
 @@ -177,7 +185,7 @@ class RealSenseCamera(Camera):
              RuntimeError: If the pipeline starts but fails to apply requested settings.
          """
- 
+
 -        self.rs_pipeline = rs.pipeline()
 +        self.rs_pipeline = rs.pipeline(_make_isolated_rs_context())
          rs_config = rs.config()
          self._configure_rs_pipeline_config(rs_config)
- 
+
 @@ -224,7 +232,7 @@ class RealSenseCamera(Camera):
              ImportError: If pyrealsense2 is not installed.
          """
@@ -33,21 +33,32 @@ index 29cb1e5e..797068ce 100644
 -        context = rs.context()
 +        context = _make_isolated_rs_context()
          devices = context.query_devices()
- 
+
          for device in devices:
 diff --git a/src/lerobot/scripts/lerobot_record.py b/src/lerobot/scripts/lerobot_record.py
-index 4233f0bc..89b840ed 100644
+index 4233f0bc..dfb8293f 100644
 --- a/src/lerobot/scripts/lerobot_record.py
 +++ b/src/lerobot/scripts/lerobot_record.py
-@@ -93,6 +93,7 @@ import logging
+@@ -93,6 +93,9 @@ import logging
  import time
  from dataclasses import asdict, dataclass
  from pprint import pformat
 +from threading import Event, Lock, Thread
- 
++
++import numpy as np
+
  from lerobot.cameras import CameraConfig  # noqa: F401
  from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
-@@ -173,10 +174,15 @@ class RecordConfig:
+@@ -166,6 +169,8 @@ from lerobot.utils.visualization_utils import (
+     shutdown_visualization,
+ )
+
++SEGMENT_ID_FEATURE = "annotation.segment_id"
++
+
+ @dataclass
+ class RecordConfig:
+@@ -173,10 +178,15 @@ class RecordConfig:
      dataset: DatasetRecordConfig
      # Teleoperator to control the robot (required)
      teleop: TeleoperatorConfig | None = None
@@ -63,7 +74,18 @@ index 4233f0bc..89b840ed 100644
      # For "rerun": IP of a remote server to send to. For "foxglove": interface to bind the WebSocket
      # server to (127.0.0.1 for local only, 0.0.0.0 for all interfaces).
      display_ip: str | None = None
-@@ -196,6 +202,16 @@ class RecordConfig:
+@@ -184,6 +194,10 @@ class RecordConfig:
+     display_port: int | None = None
+     # Whether to display compressed (JPEG) images instead of raw frames
+     display_compressed_images: bool = False
++    # Add an episode-local annotation.segment_id column controlled by Space.
++    segment_annotation: bool = False
++    # Ignore HID keyboard auto-repeat within this interval after a segment press.
++    segment_debounce_s: float = 0.4
+     # Use vocal synthesis to read events.
+     play_sounds: bool = True
+     # Resume recording on an existing dataset.
+@@ -196,6 +210,18 @@ class RecordConfig:
                  "Use --teleop.type=... to specify one. "
                  "For policy-based deployment, use lerobot-rollout instead."
              )
@@ -77,13 +99,45 @@ index 4233f0bc..89b840ed 100644
 +                f"display_fps must be positive and no greater than dataset.fps "
 +                f"({self.display_fps} > {self.dataset.fps})"
 +            )
- 
- 
++        if self.segment_debounce_s < 0:
++            raise ValueError("segment_debounce_s must be non-negative")
+
+
  """ --------------- record_loop() data flow --------------------------
-@@ -224,6 +240,168 @@ class RecordConfig:
+@@ -224,6 +250,205 @@ class RecordConfig:
  """
- 
- 
+
+
++def _add_segment_annotation(
++    frame: dict,
++    *,
++    dataset: LeRobotDataset,
++    events: dict,
++    frame_index: int,
++    segment_id: int,
++) -> int:
++    """Start a requested segment and attach the current dense segment ID."""
++    if SEGMENT_ID_FEATURE not in dataset.features:
++        return segment_id
++
++    requested = events["segment_boundary_requested"]
++    starts_segment = requested.is_set()
++    if starts_segment:
++        requested.clear()
++        segment_id += 1
++    frame[SEGMENT_ID_FEATURE] = np.asarray([segment_id], dtype=np.int64)
++
++    if starts_segment:
++        logging.info(
++            "SEGMENT %d      Episode %d · starts at frame %d · %.2f s",
++            segment_id,
++            dataset.num_episodes + 1,
++            frame_index,
++            frame_index / dataset.fps,
++        )
++    return segment_id
++
++
 +def _record_loop_with_decoupled_control(
 +    *,
 +    robot: Robot,
@@ -152,6 +206,7 @@ index 4233f0bc..89b840ed 100644
 +
 +    start_episode_t: float | None = None
 +    captured_frames = 0
++    segment_id = 0
 +    try:
 +        if not action_ready.wait(timeout=5.0):
 +            raise TimeoutError(f"No teleoperation action received within 5 s at {control_fps} Hz")
@@ -194,9 +249,15 @@ index 4233f0bc..89b840ed 100644
 +                    action_values,
 +                    prefix=ACTION,
 +                )
-+                dataset.add_frame(
-+                    {**observation_frame, **action_frame, "task": single_task}
++                frame = {**observation_frame, **action_frame, "task": single_task}
++                segment_id = _add_segment_annotation(
++                    frame,
++                    dataset=dataset,
++                    events=events,
++                    frame_index=captured_frames,
++                    segment_id=segment_id,
 +                )
++                dataset.add_frame(frame)
 +
 +            if display_data and start_loop_t - last_display_t >= display_interval_s:
 +                log_visualization_data(
@@ -249,7 +310,7 @@ index 4233f0bc..89b840ed 100644
  @safe_stop_image_writer
  def record_loop(
      robot: Robot,
-@@ -244,11 +422,39 @@ def record_loop(
+@@ -244,11 +469,39 @@ def record_loop(
      single_task: str | None = None,
      display_data: bool = False,
      display_mode: str = "rerun",
@@ -259,7 +320,7 @@ index 4233f0bc..89b840ed 100644
  ):
      if dataset is not None and dataset.fps != fps:
          raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
- 
+
 +    requested_control_fps = control_fps or fps
 +    if requested_control_fps < fps:
 +        raise ValueError(f"control_fps must be at least fps ({requested_control_fps} < {fps})")
@@ -289,19 +350,31 @@ index 4233f0bc..89b840ed 100644
      teleop_arm = teleop_keyboard = None
      if isinstance(teleop, list):
          teleop_keyboard = next((t for t in teleop if isinstance(t, KeyboardTeleop)), None)
-@@ -279,6 +485,8 @@ def record_loop(
+@@ -279,6 +532,10 @@ def record_loop(
      no_action_count = 0
      timestamp = 0
      start_episode_t = time.perf_counter()
++    dataset_frame_index = 0
++    segment_id = 0
 +    display_interval_s = 1 / (display_fps or fps)
 +    last_display_t = float("-inf")
      while timestamp < control_time_s:
          start_loop_t = time.perf_counter()
- 
-@@ -337,13 +545,14 @@ def record_loop(
+
+@@ -335,15 +592,24 @@ def record_loop(
+         if dataset is not None:
+             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
              frame = {**observation_frame, **action_frame, "task": single_task}
++            segment_id = _add_segment_annotation(
++                frame,
++                dataset=dataset,
++                events=events,
++                frame_index=dataset_frame_index,
++                segment_id=segment_id,
++            )
              dataset.add_frame(frame)
- 
++            dataset_frame_index += 1
+
 -        if display_data:
 +        if display_data and start_loop_t - last_display_t >= display_interval_s:
              log_visualization_data(
@@ -311,10 +384,10 @@ index 4233f0bc..89b840ed 100644
                  compress_images=display_compressed_images,
              )
 +            last_display_t = start_loop_t
- 
+
          dt_s = time.perf_counter() - start_loop_t
- 
-@@ -366,7 +575,7 @@ def record(
+
+@@ -366,7 +632,7 @@ def record(
      robot_observation_processor: RobotProcessorPipeline | None = None,
  ) -> LeRobotDataset:
      init_logging()
@@ -323,17 +396,77 @@ index 4233f0bc..89b840ed 100644
      if cfg.display_data:
          init_visualization(
              cfg.display_mode, session_name="recording", ip=cfg.display_ip, port=cfg.display_port
-@@ -481,7 +690,9 @@ def record(
-                     single_task=cfg.dataset.single_task,
-                     display_data=cfg.display_data,
-                     display_mode=cfg.display_mode,
-+                    display_fps=cfg.display_fps,
-                     display_compressed_images=display_compressed_images,
-+                    control_fps=cfg.control_fps,
-                 )
- 
+@@ -405,6 +671,12 @@ def record(
+             use_videos=cfg.dataset.video,
+         ),
+     )
++    if cfg.segment_annotation:
++        dataset_features[SEGMENT_ID_FEATURE] = {
++            "dtype": "int64",
++            "shape": (1,),
++            "names": ["id"],
++        }
+
+     dataset = None
+     listener = None
+@@ -457,7 +729,10 @@ def record(
+         if teleop is not None:
+             teleop.connect()
+
+-        listener, events = init_keyboard_listener()
++        listener, events = init_keyboard_listener(
++            enable_segments=cfg.segment_annotation,
++            segment_debounce_s=cfg.segment_debounce_s,
++        )
+
+         if not cfg.dataset.streaming_encoding:
+             logging.info(
+@@ -468,21 +743,29 @@ def record(
+             recorded_episodes = 0
+             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+-                record_loop(
+-                    robot=robot,
+-                    events=events,
+-                    fps=cfg.dataset.fps,
+-                    teleop_action_processor=teleop_action_processor,
+-                    robot_action_processor=robot_action_processor,
+-                    robot_observation_processor=robot_observation_processor,
+-                    teleop=teleop,
+-                    dataset=dataset,
+-                    control_time_s=cfg.dataset.episode_time_s,
+-                    single_task=cfg.dataset.single_task,
+-                    display_data=cfg.display_data,
+-                    display_mode=cfg.display_mode,
+-                    display_compressed_images=display_compressed_images,
+-                )
++                events["segment_boundary_requested"].clear()
++                events["recording_active"] = cfg.segment_annotation
++                try:
++                    record_loop(
++                        robot=robot,
++                        events=events,
++                        fps=cfg.dataset.fps,
++                        teleop_action_processor=teleop_action_processor,
++                        robot_action_processor=robot_action_processor,
++                        robot_observation_processor=robot_observation_processor,
++                        teleop=teleop,
++                        dataset=dataset,
++                        control_time_s=cfg.dataset.episode_time_s,
++                        single_task=cfg.dataset.single_task,
++                        display_data=cfg.display_data,
++                        display_mode=cfg.display_mode,
++                        display_fps=cfg.display_fps,
++                        display_compressed_images=display_compressed_images,
++                        control_fps=cfg.control_fps,
++                    )
++                finally:
++                    events["recording_active"] = False
++                    events["segment_boundary_requested"].clear()
+
                  # Execute a few seconds without recording to give time to manually reset the environment
-@@ -503,6 +714,9 @@ def record(
+                 # Skip reset for the last episode to be recorded
+@@ -503,6 +786,9 @@ def record(
                          single_task=cfg.dataset.single_task,
                          display_data=cfg.display_data,
                          display_mode=cfg.display_mode,
@@ -341,7 +474,7 @@ index 4233f0bc..89b840ed 100644
 +                        display_compressed_images=display_compressed_images,
 +                        control_fps=cfg.control_fps,
                      )
- 
+
                  if events["rerecord_episode"]:
 diff --git a/src/lerobot/scripts/lerobot_teleoperate.py b/src/lerobot/scripts/lerobot_teleoperate.py
 index 30f13987..81b7e4cd 100644
@@ -349,7 +482,7 @@ index 30f13987..81b7e4cd 100644
 +++ b/src/lerobot/scripts/lerobot_teleoperate.py
 @@ -70,6 +70,8 @@ lerobot-teleoperate \
  """
- 
+
  import logging
 +import os
 +import sys
@@ -375,11 +508,11 @@ index 30f13987..81b7e4cd 100644
 +        else:
 +            print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
 +            move_cursor_up(1)
- 
+
          if duration is not None and time.perf_counter() - start >= duration:
              return
 @@ -239,7 +252,7 @@ def teleop_loop(
- 
+
  @parser.wrap()
  def teleoperate(cfg: TeleoperateConfig):
 -    init_logging()
@@ -397,23 +530,110 @@ index 30f13987..81b7e4cd 100644
          if cfg.display_data:
              shutdown_visualization(cfg.display_mode)
          teleop.disconnect()
+diff --git a/src/lerobot/utils/keyboard_input.py b/src/lerobot/utils/keyboard_input.py
+index 00c0f53e..9767f1f2 100644
+--- a/src/lerobot/utils/keyboard_input.py
++++ b/src/lerobot/utils/keyboard_input.py
+@@ -393,7 +393,11 @@ def create_key_listener(dispatch: Callable[[str], None], *, controls_help: str =
+     return None
+
+
+-def init_keyboard_listener():
++def init_keyboard_listener(
++    *,
++    enable_segments: bool = False,
++    segment_debounce_s: float = 0.4,
++):
+     """Initialize a non-blocking keyboard listener for interactive recording controls.
+
+     Backend selection:
+@@ -408,25 +412,38 @@ def init_keyboard_listener():
+       the episode/reset timers (or Ctrl+C).
+
+     Both backends accept the same controls: Right/Left/Esc, plus the single-byte letter
+-    equivalents ``n`` (next), ``r`` (re-record) and ``q`` (quit). The letters are the most
+-    reliable choice over high-latency SSH/VNC links, where arrow-key escape sequences can
+-    be split, delayed, or intercepted by the terminal.
++    equivalents ``n`` (next), ``r`` (re-record) and ``q`` (quit). When
++    ``enable_segments`` is true, Space latches a request to start the next segment at the
++    next dataset frame while an episode is actively recording. The debounce interval
++    prevents a held HID pedal from generating repeated boundaries through keyboard
++    auto-repeat. The letters
++    are the most reliable choice over high-latency SSH/VNC links, where arrow-key escape
++    sequences can be split, delayed, or intercepted by the terminal.
+
+     Returns:
+         A tuple ``(listener, events)`` where ``listener`` exposes ``.stop()`` or is
+         ``None``, and ``events`` is the dict of flags (``exit_early``,
+-        ``rerecord_episode``, ``stop_recording``) set by key presses.
++        ``rerecord_episode``, ``stop_recording``) set by key presses. The additional
++        ``segment_boundary_requested`` value is a :class:`threading.Event` consumed by the
++        recording loop.
+     """
++    if segment_debounce_s < 0:
++        raise ValueError("segment_debounce_s must be non-negative")
++
+     events = {
+         "exit_early": False,
+         "rerecord_episode": False,
+         "stop_recording": False,
++        "recording_active": False,
++        "segment_boundary_requested": threading.Event(),
+     }
++    last_segment_t = float("-inf")
+
+     # Accept the single-byte letter equivalents n/r/q alongside the arrow/Esc keys: the
+     # letters are immune to the escape-sequence split/delay/interception that affects arrows
+     # over laggy SSH/VNC links. Case-insensitive so Shift+letter still works.
+     def on_key(name: str) -> None:
++        nonlocal last_segment_t
+         key = name.lower()
+         if key in ("right", "n"):
+             apply_recording_control("right", events)
+@@ -434,7 +451,17 @@ def init_keyboard_listener():
+             apply_recording_control("left", events)
+         elif key in ("esc", "q"):
+             apply_recording_control("esc", events)
++        elif key == "space" and enable_segments:
++            now = time.monotonic()
++            if not events["recording_active"]:
++                logger.info("Ignoring segment pedal outside an active recording episode.")
++            elif now - last_segment_t >= segment_debounce_s:
++                last_segment_t = now
++                events["segment_boundary_requested"].set()
+         # other keys (incl. up/down) are intentionally ignored
+
+-    listener = create_key_listener(on_key, controls_help="Right/Left/Esc, or n=next, r=re-record, q=quit")
++    controls_help = "Right/Left/Esc, or n=next, r=re-record, q=quit"
++    if enable_segments:
++        controls_help = f"{controls_help}, Space=next segment"
++    listener = create_key_listener(on_key, controls_help=controls_help)
+     return listener, events
 diff --git a/tests/test_control_robot.py b/tests/test_control_robot.py
-index dd10c0c1..65f1f514 100644
+index dd10c0c1..d76d1f00 100644
 --- a/tests/test_control_robot.py
 +++ b/tests/test_control_robot.py
-@@ -27,7 +27,7 @@ from lerobot.scripts.lerobot_record import RecordConfig, record
+@@ -14,6 +14,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+
++from threading import Event
+ from unittest.mock import patch
+
+ import pytest
+@@ -27,7 +28,7 @@ from lerobot.scripts.lerobot_record import RecordConfig, record
  from lerobot.scripts.lerobot_replay import DatasetReplayConfig, ReplayConfig, replay
  from lerobot.scripts.lerobot_teleoperate import TeleoperateConfig, teleoperate
  from tests.fixtures.constants import DUMMY_REPO_ID
 -from tests.mocks.mock_robot import MockRobotConfig
 +from tests.mocks.mock_robot import MockRobot, MockRobotConfig
  from tests.mocks.mock_teleop import MockTeleopConfig
- 
- 
-@@ -48,6 +48,41 @@ def test_teleoperate():
+
+
+@@ -48,6 +49,95 @@ def test_teleoperate():
      teleoperate(cfg)
- 
- 
+
+
 +def test_record_decouples_control_rate_from_dataset_rate(tmp_path):
 +    robot_cfg = MockRobotConfig()
 +    teleop_cfg = MockTeleopConfig()
@@ -447,6 +667,60 @@ index dd10c0c1..65f1f514 100644
 +
 +    assert dataset.num_frames == 3
 +    assert send_count > dataset.num_frames
++
++
++def test_record_writes_dense_foot_pedal_segment_ids(tmp_path):
++    robot_cfg = MockRobotConfig()
++    teleop_cfg = MockTeleopConfig()
++    dataset_cfg = DatasetRecordConfig(
++        repo_id=DUMMY_REPO_ID,
++        single_task="Dummy task",
++        root=tmp_path / "record_segments",
++        fps=30,
++        num_episodes=1,
++        episode_time_s=0.15,
++        push_to_hub=False,
++    )
++    cfg = RecordConfig(
++        robot=robot_cfg,
++        teleop=teleop_cfg,
++        dataset=dataset_cfg,
++        segment_annotation=True,
++        play_sounds=False,
++    )
++
++    events = {
++        "exit_early": False,
++        "rerecord_episode": False,
++        "stop_recording": False,
++        "recording_active": False,
++        "segment_boundary_requested": Event(),
++    }
++    recorded_observations = 0
++    original_get_observation = MockRobot.get_observation
++
++    def mark_segment_boundaries(self):
++        nonlocal recorded_observations
++        if events["recording_active"]:
++            recorded_observations += 1
++            if recorded_observations in {2, 4}:
++                events["segment_boundary_requested"].set()
++        return original_get_observation(self)
++
++    with (
++        patch(
++            "lerobot.scripts.lerobot_record.init_keyboard_listener",
++            return_value=(None, events),
++        ),
++        patch.object(MockRobot, "get_observation", mark_segment_boundaries),
++    ):
++        dataset = record(cfg)
++
++    assert "annotation.segment_id" in dataset.features
++    segment_ids = [int(value) for value in dataset.hf_dataset["annotation.segment_id"]]
++    assert set(segment_ids) == {0, 1, 2}
++    assert segment_ids == sorted(segment_ids)
++    assert sum(current != previous for previous, current in zip(segment_ids, segment_ids[1:])) == 2
 +
 +
  def test_record_and_resume(tmp_path):
