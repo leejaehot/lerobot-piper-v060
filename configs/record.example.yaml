@@ -1,0 +1,37 @@
+dataset:
+  repo_id: local/piper_doubleport
+  task: Put the object in the target container.
+  episodes: 10
+  episode_seconds: 60
+  reset_seconds: 30
+  push_to_hub: false
+
+# RealSense SDK serials from: lerobot-find-cameras realsense
+cameras:
+  egoview: "REPLACE_WITH_D435_SERIAL"
+  wristcam: "REPLACE_WITH_D405_SERIAL"
+
+capture:
+  dataset_fps: 30
+  control_fps: 200
+  width: 640
+  height: 480
+  rerun: true
+  rerun_compress_images: true
+  rerun_fps: 10
+
+arm:
+  leader_can: can_leader
+  follower_can: can_follower
+  speed_percent: 100
+  max_relative_target: 100
+  gripper_input_min: 1000
+  gripper_input_max: 50000
+
+video:
+  codec: h264
+  preset: veryfast
+  crf: 28
+  keyframe_interval: 30
+  encoder_threads: 2
+  streaming: false

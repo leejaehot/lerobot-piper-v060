@@ -1,0 +1,454 @@
+diff --git a/src/lerobot/cameras/realsense/camera_realsense.py b/src/lerobot/cameras/realsense/camera_realsense.py
+index 29cb1e5e..797068ce 100644
+--- a/src/lerobot/cameras/realsense/camera_realsense.py
++++ b/src/lerobot/cameras/realsense/camera_realsense.py
+@@ -45,6 +45,14 @@ logger = logging.getLogger(__name__)
+ pkg_name = "pyrealsense2-macosx" if sys.platform == "darwin" else "pyrealsense2"
+ 
+ 
++def _make_isolated_rs_context():
++    """Create a context independent of mutable RealSense Viewer settings."""
++    # Older viewers can persist `"context": ""` in ~/.realsense-config.json,
++    # while newer librealsense versions require an object and fail before USB
++    # discovery. LeRobot only needs its explicitly configured local cameras.
++    return rs.context({"inherit": False})
++
++
+ class RealSenseCamera(Camera):
+     """
+     Manages interactions with Intel RealSense cameras for frame and depth recording.
+@@ -177,7 +185,7 @@ class RealSenseCamera(Camera):
+             RuntimeError: If the pipeline starts but fails to apply requested settings.
+         """
+ 
+-        self.rs_pipeline = rs.pipeline()
++        self.rs_pipeline = rs.pipeline(_make_isolated_rs_context())
+         rs_config = rs.config()
+         self._configure_rs_pipeline_config(rs_config)
+ 
+@@ -224,7 +232,7 @@ class RealSenseCamera(Camera):
+             ImportError: If pyrealsense2 is not installed.
+         """
+         found_cameras_info = []
+-        context = rs.context()
++        context = _make_isolated_rs_context()
+         devices = context.query_devices()
+ 
+         for device in devices:
+diff --git a/src/lerobot/scripts/lerobot_record.py b/src/lerobot/scripts/lerobot_record.py
+index 4233f0bc..89b840ed 100644
+--- a/src/lerobot/scripts/lerobot_record.py
++++ b/src/lerobot/scripts/lerobot_record.py
+@@ -93,6 +93,7 @@ import logging
+ import time
+ from dataclasses import asdict, dataclass
+ from pprint import pformat
++from threading import Event, Lock, Thread
+ 
+ from lerobot.cameras import CameraConfig  # noqa: F401
+ from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
+@@ -173,10 +174,15 @@ class RecordConfig:
+     dataset: DatasetRecordConfig
+     # Teleoperator to control the robot (required)
+     teleop: TeleoperatorConfig | None = None
++    # Optional teleoperation rate. When higher than dataset.fps, robot commands
++    # run in a dedicated loop while observations are recorded at dataset.fps.
++    control_fps: int | None = None
+     # Display all cameras on screen
+     display_data: bool = False
+     # Visualization backend used when display_data is True: "rerun" or "foxglove".
+     display_mode: str = "rerun"
++    # Optional visualization rate. Dataset capture keeps running at dataset.fps.
++    display_fps: float | None = None
+     # For "rerun": IP of a remote server to send to. For "foxglove": interface to bind the WebSocket
+     # server to (127.0.0.1 for local only, 0.0.0.0 for all interfaces).
+     display_ip: str | None = None
+@@ -196,6 +202,16 @@ class RecordConfig:
+                 "Use --teleop.type=... to specify one. "
+                 "For policy-based deployment, use lerobot-rollout instead."
+             )
++        if self.control_fps is not None and self.control_fps < self.dataset.fps:
++            raise ValueError(
++                f"control_fps must be at least dataset.fps "
++                f"({self.control_fps} < {self.dataset.fps})"
++            )
++        if self.display_fps is not None and not 0 < self.display_fps <= self.dataset.fps:
++            raise ValueError(
++                f"display_fps must be positive and no greater than dataset.fps "
++                f"({self.display_fps} > {self.dataset.fps})"
++            )
+ 
+ 
+ """ --------------- record_loop() data flow --------------------------
+@@ -224,6 +240,168 @@ class RecordConfig:
+ """
+ 
+ 
++def _record_loop_with_decoupled_control(
++    *,
++    robot: Robot,
++    events: dict,
++    fps: int,
++    control_fps: int,
++    teleop_action_processor: RobotProcessorPipeline,
++    robot_action_processor: RobotProcessorPipeline,
++    robot_observation_processor: RobotProcessorPipeline,
++    dataset: LeRobotDataset | None,
++    teleop: Teleoperator,
++    control_time_s: int | float,
++    single_task: str | None,
++    display_data: bool,
++    display_mode: str,
++    display_fps: float | None,
++    display_compressed_images: bool,
++) -> None:
++    """Record at camera FPS while relaying teleoperation at a higher rate."""
++    state_lock = Lock()
++    stop_control = Event()
++    action_ready = Event()
++    initial_obs = robot.get_observation()
++    latest_obs = initial_obs
++    latest_action: RobotAction | None = None
++    control_failure: BaseException | None = None
++
++    def control_worker() -> None:
++        nonlocal latest_action, control_failure
++        interval_s = 1 / control_fps
++        next_loop_t = time.perf_counter()
++        try:
++            while not stop_control.is_set():
++                with state_lock:
++                    obs = latest_obs
++
++                action = teleop.get_action()
++                if robot.name == "unitree_g1":
++                    teleop.send_feedback(obs)
++                processed_action = teleop_action_processor((action, obs))
++                robot_action = robot_action_processor((processed_action, obs))
++                robot.send_action(robot_action)
++
++                with state_lock:
++                    latest_action = processed_action
++                action_ready.set()
++
++                next_loop_t += interval_s
++                sleep_time_s = next_loop_t - time.perf_counter()
++                if sleep_time_s < -interval_s:
++                    next_loop_t = time.perf_counter()
++                    sleep_time_s = 0.0
++                precise_sleep(max(sleep_time_s, 0.0))
++        except BaseException as exc:
++            with state_lock:
++                control_failure = exc
++            action_ready.set()
++            stop_control.set()
++
++    control_thread = Thread(
++        target=control_worker,
++        name=f"{robot.name}-{control_fps}hz-control",
++        daemon=True,
++    )
++    control_thread.start()
++
++    start_episode_t: float | None = None
++    captured_frames = 0
++    try:
++        if not action_ready.wait(timeout=5.0):
++            raise TimeoutError(f"No teleoperation action received within 5 s at {control_fps} Hz")
++
++        frame_interval_s = 1 / fps
++        first_frame = True
++        display_interval_s = 1 / (display_fps or fps)
++        last_display_t = float("-inf")
++        rate_window_frames = 0
++        rate_window_t = start_episode_t = time.perf_counter()
++        timestamp = 0.0
++        while timestamp < control_time_s:
++            start_loop_t = time.perf_counter()
++
++            if events["exit_early"]:
++                events["exit_early"] = False
++                break
++
++            obs = initial_obs if first_frame else robot.get_observation()
++            first_frame = False
++            obs_processed = robot_observation_processor(obs)
++
++            with state_lock:
++                latest_obs = obs
++                action_values = latest_action
++                failure = control_failure
++            if failure is not None:
++                raise RuntimeError("High-rate teleoperation loop failed") from failure
++            if action_values is None:
++                raise RuntimeError("High-rate teleoperation loop produced no action")
++
++            if dataset is not None:
++                observation_frame = build_dataset_frame(
++                    dataset.features,
++                    obs_processed,
++                    prefix=OBS_STR,
++                )
++                action_frame = build_dataset_frame(
++                    dataset.features,
++                    action_values,
++                    prefix=ACTION,
++                )
++                dataset.add_frame(
++                    {**observation_frame, **action_frame, "task": single_task}
++                )
++
++            if display_data and start_loop_t - last_display_t >= display_interval_s:
++                log_visualization_data(
++                    display_mode,
++                    observation=obs_processed,
++                    action=action_values,
++                    compress_images=display_compressed_images,
++                )
++                last_display_t = start_loop_t
++
++            captured_frames += 1
++            rate_window_frames += 1
++            now = time.perf_counter()
++            window_s = now - rate_window_t
++            if window_s >= 1.0:
++                effective_hz = rate_window_frames / window_s
++                if effective_hz < fps * 0.98:
++                    logging.warning(
++                        "Dataset capture averaged %.1f Hz over %.1f s (target %d Hz). "
++                        "Robot control remains on the separate %d Hz loop.",
++                        effective_hz,
++                        window_s,
++                        fps,
++                        control_fps,
++                    )
++                rate_window_t = now
++                rate_window_frames = 0
++
++            # Use an absolute deadline so small scheduling overhead does not
++            # accumulate into timestamp drift over a long episode.
++            next_frame_t = start_episode_t + captured_frames * frame_interval_s
++            precise_sleep(max(next_frame_t - time.perf_counter(), 0.0))
++            timestamp = time.perf_counter() - start_episode_t
++    finally:
++        stop_control.set()
++        control_thread.join(timeout=2.0)
++        if control_thread.is_alive():
++            logging.error("High-rate teleoperation thread did not stop within 2 s")
++        elapsed_s = time.perf_counter() - start_episode_t if start_episode_t is not None else 0.0
++        if captured_frames and elapsed_s > 0:
++            logging.info(
++                "CAPTURE        %d frames / %.2f s = %.1f Hz (target %d Hz)",
++                captured_frames,
++                elapsed_s,
++                captured_frames / elapsed_s,
++                fps,
++            )
++
++
+ @safe_stop_image_writer
+ def record_loop(
+     robot: Robot,
+@@ -244,11 +422,39 @@ def record_loop(
+     single_task: str | None = None,
+     display_data: bool = False,
+     display_mode: str = "rerun",
++    display_fps: float | None = None,
+     display_compressed_images: bool = False,
++    control_fps: int | None = None,
+ ):
+     if dataset is not None and dataset.fps != fps:
+         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
+ 
++    requested_control_fps = control_fps or fps
++    if requested_control_fps < fps:
++        raise ValueError(f"control_fps must be at least fps ({requested_control_fps} < {fps})")
++    if requested_control_fps > fps:
++        if not isinstance(teleop, Teleoperator):
++            raise ValueError("Decoupled high-rate control requires one Teleoperator")
++        if control_time_s is None:
++            raise ValueError("control_time_s is required for high-rate control")
++        return _record_loop_with_decoupled_control(
++            robot=robot,
++            events=events,
++            fps=fps,
++            control_fps=requested_control_fps,
++            teleop_action_processor=teleop_action_processor,
++            robot_action_processor=robot_action_processor,
++            robot_observation_processor=robot_observation_processor,
++            dataset=dataset,
++            teleop=teleop,
++            control_time_s=control_time_s,
++            single_task=single_task,
++            display_data=display_data,
++            display_mode=display_mode,
++            display_fps=display_fps,
++            display_compressed_images=display_compressed_images,
++        )
++
+     teleop_arm = teleop_keyboard = None
+     if isinstance(teleop, list):
+         teleop_keyboard = next((t for t in teleop if isinstance(t, KeyboardTeleop)), None)
+@@ -279,6 +485,8 @@ def record_loop(
+     no_action_count = 0
+     timestamp = 0
+     start_episode_t = time.perf_counter()
++    display_interval_s = 1 / (display_fps or fps)
++    last_display_t = float("-inf")
+     while timestamp < control_time_s:
+         start_loop_t = time.perf_counter()
+ 
+@@ -337,13 +545,14 @@ def record_loop(
+             frame = {**observation_frame, **action_frame, "task": single_task}
+             dataset.add_frame(frame)
+ 
+-        if display_data:
++        if display_data and start_loop_t - last_display_t >= display_interval_s:
+             log_visualization_data(
+                 display_mode,
+                 observation=obs_processed,
+                 action=action_values,
+                 compress_images=display_compressed_images,
+             )
++            last_display_t = start_loop_t
+ 
+         dt_s = time.perf_counter() - start_loop_t
+ 
+@@ -366,7 +575,7 @@ def record(
+     robot_observation_processor: RobotProcessorPipeline | None = None,
+ ) -> LeRobotDataset:
+     init_logging()
+-    logging.info(pformat(asdict(cfg)))
++    logging.debug(pformat(asdict(cfg)))
+     if cfg.display_data:
+         init_visualization(
+             cfg.display_mode, session_name="recording", ip=cfg.display_ip, port=cfg.display_port
+@@ -481,7 +690,9 @@ def record(
+                     single_task=cfg.dataset.single_task,
+                     display_data=cfg.display_data,
+                     display_mode=cfg.display_mode,
++                    display_fps=cfg.display_fps,
+                     display_compressed_images=display_compressed_images,
++                    control_fps=cfg.control_fps,
+                 )
+ 
+                 # Execute a few seconds without recording to give time to manually reset the environment
+@@ -503,6 +714,9 @@ def record(
+                         single_task=cfg.dataset.single_task,
+                         display_data=cfg.display_data,
+                         display_mode=cfg.display_mode,
++                        display_fps=cfg.display_fps,
++                        display_compressed_images=display_compressed_images,
++                        control_fps=cfg.control_fps,
+                     )
+ 
+                 if events["rerecord_episode"]:
+diff --git a/src/lerobot/scripts/lerobot_teleoperate.py b/src/lerobot/scripts/lerobot_teleoperate.py
+index 30f13987..81b7e4cd 100644
+--- a/src/lerobot/scripts/lerobot_teleoperate.py
++++ b/src/lerobot/scripts/lerobot_teleoperate.py
+@@ -70,6 +70,8 @@ lerobot-teleoperate \
+ """
+ 
+ import logging
++import os
++import sys
+ import time
+ from dataclasses import asdict, dataclass
+ from pprint import pformat
+@@ -230,8 +232,19 @@ def teleop_loop(
+         dt_s = time.perf_counter() - loop_start
+         precise_sleep(max(1 / fps - dt_s, 0.0))
+         loop_s = time.perf_counter() - loop_start
+-        print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+-        move_cursor_up(1)
++        terminal_status = getattr(robot, "get_teleop_terminal_lines", None)
++        if callable(terminal_status):
++            lines = terminal_status(1 / loop_s)
++            if lines:
++                output = "\n".join(f"\033[2K{line}" for line in lines)
++                if getattr(robot, "teleop_terminal_fullscreen", False) and sys.stdout.isatty():
++                    sys.stdout.write(f"\033[H{output}\033[J")
++                else:
++                    sys.stdout.write(f"{output}\033[{len(lines)}A")
++                sys.stdout.flush()
++        else:
++            print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
++            move_cursor_up(1)
+ 
+         if duration is not None and time.perf_counter() - start >= duration:
+             return
+@@ -239,7 +252,7 @@ def teleop_loop(
+ 
+ @parser.wrap()
+ def teleoperate(cfg: TeleoperateConfig):
+-    init_logging()
++    init_logging(console_level=os.environ.get("LEROBOT_TELEOP_CONSOLE_LEVEL", "INFO"))
+     logging.info(pformat(asdict(cfg)))
+     if cfg.display_data:
+         init_visualization(
+@@ -274,6 +287,9 @@ def teleoperate(cfg: TeleoperateConfig):
+     except KeyboardInterrupt:
+         pass
+     finally:
++        close_terminal = getattr(robot, "close_teleop_terminal", None)
++        if callable(close_terminal):
++            close_terminal()
+         if cfg.display_data:
+             shutdown_visualization(cfg.display_mode)
+         teleop.disconnect()
+diff --git a/tests/test_control_robot.py b/tests/test_control_robot.py
+index dd10c0c1..65f1f514 100644
+--- a/tests/test_control_robot.py
++++ b/tests/test_control_robot.py
+@@ -27,7 +27,7 @@ from lerobot.scripts.lerobot_record import RecordConfig, record
+ from lerobot.scripts.lerobot_replay import DatasetReplayConfig, ReplayConfig, replay
+ from lerobot.scripts.lerobot_teleoperate import TeleoperateConfig, teleoperate
+ from tests.fixtures.constants import DUMMY_REPO_ID
+-from tests.mocks.mock_robot import MockRobotConfig
++from tests.mocks.mock_robot import MockRobot, MockRobotConfig
+ from tests.mocks.mock_teleop import MockTeleopConfig
+ 
+ 
+@@ -48,6 +48,41 @@ def test_teleoperate():
+     teleoperate(cfg)
+ 
+ 
++def test_record_decouples_control_rate_from_dataset_rate(tmp_path):
++    robot_cfg = MockRobotConfig()
++    teleop_cfg = MockTeleopConfig()
++    dataset_cfg = DatasetRecordConfig(
++        repo_id=DUMMY_REPO_ID,
++        single_task="Dummy task",
++        root=tmp_path / "record_high_rate_control",
++        fps=30,
++        num_episodes=1,
++        episode_time_s=0.1,
++        push_to_hub=False,
++    )
++    cfg = RecordConfig(
++        robot=robot_cfg,
++        teleop=teleop_cfg,
++        dataset=dataset_cfg,
++        control_fps=120,
++        play_sounds=False,
++    )
++
++    send_count = 0
++    original_send_action = MockRobot.send_action
++
++    def counted_send_action(self, action):
++        nonlocal send_count
++        send_count += 1
++        return original_send_action(self, action)
++
++    with patch.object(MockRobot, "send_action", counted_send_action):
++        dataset = record(cfg)
++
++    assert dataset.num_frames == 3
++    assert send_count > dataset.num_frames
++
++
+ def test_record_and_resume(tmp_path):
+     robot_cfg = MockRobotConfig()
+     teleop_cfg = MockTeleopConfig()

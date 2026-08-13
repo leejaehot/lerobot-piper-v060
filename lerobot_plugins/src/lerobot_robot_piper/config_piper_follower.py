@@ -1,0 +1,22 @@
+from dataclasses import dataclass, field
+
+from lerobot.cameras import CameraConfig
+from lerobot.robots.config import RobotConfig
+
+
+@RobotConfig.register_subclass("piper_follower")
+@dataclass(kw_only=True)
+class PiperFollowerConfig(RobotConfig):
+    port: str
+    disable_torque_on_disconnect: bool = True
+    max_relative_target: float | dict[str, float] | None = 100.0
+    speed_percent: int = 100
+    terminal_update_hz: float = 30.0
+    cameras: dict[str, CameraConfig] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not 1 <= self.speed_percent <= 100:
+            raise ValueError("speed_percent must be in [1, 100]")
+        if self.terminal_update_hz < 0:
+            raise ValueError("terminal_update_hz must be non-negative")

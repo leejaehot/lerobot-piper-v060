@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_robot_piper"
+version = "0.2.0"
+description = "Piper leader/follower plugins for LeRobot 0.6.0"
+requires-python = ">=3.12"
+dependencies = [
+  "lerobot==0.6.0",
+  "PyYAML>=6.0",
+  "pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm.git@799b8412fbe8b9156bc9892d3dbeb2df7e98be71",
+]
+
+[project.scripts]
+piper_record = "lerobot_piper.record_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

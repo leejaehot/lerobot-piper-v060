@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+configs/can_mapping.env
+configs/record.yaml
+logs/
+vendor/
+.venv/
+dist/
+build/

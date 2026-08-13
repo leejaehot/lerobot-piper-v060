@@ -1,0 +1,171 @@
+# LeRobot Piper v0.6.0
+
+AgileX Piper leader/follower teleoperation and synchronized dual-RealSense
+dataset recording for [LeRobot 0.6.0](https://github.com/huggingface/lerobot/tree/v0.6.0).
+
+The integration uses the official
+[pyAgxArm](https://github.com/agilexrobotics/pyAgxArm) API as a pinned dependency.
+It does not vendor or modify the SDK.
+
+## Highlights
+
+- Stable leader/follower SocketCAN names bound to USB adapter serials
+- Piper leader activation compatible with the proven LeRobot 0.4.3 startup flow
+- 200 Hz leader-to-follower control independent of 30 Hz dataset capture
+- D435 + D405 recording with non-blocking latest-frame sampling
+- 30 Hz absolute-deadline dataset scheduler and capture-rate summary
+- 10 Hz compressed Rerun preview without reducing recorded image quality
+- Color-coded terminal phases and a compact teleoperation dashboard
+- YAML recording configuration with small CLI overrides
+
+## Safety
+
+The follower torque is enabled during connection and the arm can move abruptly.
+Support the leader, align both arm poses, clear both workspaces, and prepare the
+emergency stop before starting teleoperation or recording.
+
+The default 200 Hz control, 100% speed, and relative target cap of 100 are
+aggressive. Reduce them for initial validation.
+
+## Layout
+
+```text
+configs/                 Local CAN and recording configuration templates
+lerobot_plugins/         Piper robot, teleoperator, CAN bus, and record CLI
+patches/                 Minimal compatibility patch for LeRobot v0.6.0
+scripts/                 Installation, CAN setup, teleop, and environment helpers
+```
+
+Local hardware identities and datasets are ignored by Git. The repository does
+not include CAN dumps, USB serial mappings, camera serials, or recorded data.
+
+## Requirements
+
+- Ubuntu with SocketCAN and the `gs_usb` driver
+- Python 3.12 environment containing LeRobot 0.6.0
+- Two Piper arms and two USB-CAN adapters
+- Intel RealSense cameras supported by `pyrealsense2`
+- `iproute2`, `udev`, Git, and FFmpeg
+
+## Install
+
+Clone LeRobot at the supported version and this repository alongside it:
+
+```bash
+git clone --branch v0.6.0 https://github.com/huggingface/lerobot.git ~/lerobot_v060
+git clone https://github.com/leejaehot/lerobot-piper-v060.git ~/piper
+
+conda activate lerobot_v060
+~/piper/scripts/install.sh ~/lerobot_v060
+source ~/piper/scripts/activate_lerobot_v060.sh
+```
+
+`install.sh` applies [the small LeRobot patch](patches/lerobot-v0.6.0-piper.patch)
+and installs the Piper package in editable mode. Re-running it is safe when the
+patch is already present.
+
+## Configure CAN roles
+
+Connect both adapters, identify which current interface belongs to each arm,
+then save the mapping:
+
+```bash
+can_init --status
+can_init --configure --leader can4 --follower can5
+can_init
+```
+
+The generated `configs/can_mapping.env` is intentionally ignored by Git.
+Initialization configures 1 Mbit/s CAN and renames the adapters to
+`can_leader` and `can_follower`; it does not send robot motion commands.
+
+## Teleoperate
+
+```bash
+piper_teleop --init-can
+```
+
+Safer initial settings can be supplied through environment variables:
+
+```bash
+PIPER_TELEOP_SPEED_PERCENT=20 \
+PIPER_TELEOP_MAX_RELATIVE_TARGET=5 \
+piper_teleop
+```
+
+The full-screen terminal dashboard displays leader target, follower qpos,
+joint tracking error, gripper position, flange pose, and control-loop rate.
+
+## Configure recording
+
+Create the local configuration and replace the two RealSense serials:
+
+```bash
+cp ~/piper/configs/record.example.yaml ~/piper/configs/record.yaml
+lerobot-find-cameras realsense
+```
+
+The most frequently edited settings are:
+
+```yaml
+dataset:
+  repo_id: local/piper_doubleport
+  task: Put the object in the target container.
+  episodes: 10
+  episode_seconds: 60
+
+cameras:
+  egoview: "D435_SERIAL"
+  wristcam: "D405_SERIAL"
+```
+
+Run a five-second validation before collecting a real dataset:
+
+```bash
+piper_record --init-can --test
+piper_record
+```
+
+A successful smoke test at 30 Hz ends with approximately:
+
+```text
+CAPTURE        150 frames / 5.00 s = 30.0 Hz (target 30 Hz)
+```
+
+Common values can also be overridden without editing YAML:
+
+```bash
+piper_record \
+  --repo-id local/pepper_to_cup \
+  --task "Put the bell pepper in the right cup." \
+  --episodes 20 \
+  --seconds 60
+```
+
+Use `--dry-run` to inspect the effective plan, `--no-rerun` to isolate
+visualization overhead, and `NO_COLOR=1` to disable ANSI colors.
+
+## Timing model
+
+The control worker relays leader commands at 200 Hz. Dataset rows are sampled on
+a separate 30 Hz absolute schedule. Each RealSense camera continuously captures
+in its own background thread; the recorder snapshots the newest frames and then
+reads follower state for the same row. Rerun receives a compressed 10 Hz preview
+while the stored frames retain their configured capture quality.
+
+This provides software synchronization suitable for standard LeRobot training.
+It does not provide hardware-triggered simultaneous exposure between independent
+RealSense cameras; their physical capture times can differ by up to one camera
+period (about 33 ms at 30 Hz).
+
+## Test
+
+```bash
+conda activate lerobot_v060
+HF_HOME=/tmp/lerobot-test-hf \
+HF_LEROBOT_HOME=/tmp/lerobot-test-data \
+pytest -q ~/piper/lerobot_plugins/tests ~/lerobot_v060/tests/test_control_robot.py
+```
+
+The current integration test suite passes 16 tests, including high-rate control,
+plugin startup flow, camera sampling, terminal UI, recording, and resume paths.
