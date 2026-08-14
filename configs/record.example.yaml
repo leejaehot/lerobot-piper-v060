@@ -6,10 +6,31 @@ dataset:
   reset_seconds: 30
   push_to_hub: false
 
+# Before episode 1, arrange objects on the live grid and press Enter.
+initial_setup:
+  wait_for_enter: true
+
 # RealSense SDK serials from: lerobot-find-cameras realsense
 cameras:
   egoview: "REPLACE_WITH_D435_SERIAL"
   wristcam: "REPLACE_WITH_D405_SERIAL"
+
+# Object initial-pose guide. The corners are fractions of the egoview image,
+# ordered top-left, top-right, bottom-right, bottom-left. Each initial pose is a
+# fixed zero-based [column, row] point or four-corner box; no nearby poses are generated.
+reset_grid:
+  enabled: true
+  camera: egoview
+  columns: 16
+  rows: 12
+  corners:
+    - [0.0, 0.0]
+    - [1.0, 0.0]
+    - [1.0, 1.0]
+    - [0.0, 1.0]
+  initial_poses:
+    object: [4, 6]
+    target_container: [[9, 3], [14, 3], [9, 9], [14, 9]]
 
 capture:
   dataset_fps: 30
@@ -17,13 +38,20 @@ capture:
   width: 640
   height: 480
   rerun: true
-  rerun_compress_images: true
+  # Raw is more reliable in the native Rerun viewer on Jetson. Enable JPEG only
+  # when sending previews to a remote viewer and bandwidth matters.
+  rerun_compress_images: false
   rerun_fps: 10
 
 arm:
   leader_can: can_leader
   follower_can: can_follower
   speed_percent: 100
+  # Home only the follower after each take; never command the leader home.
+  # Recording stops if the follower is not home before the final countdown.
+  home_on_reset: true
+  home_speed_percent: 20
+  home_tolerance_degrees: 2
   max_relative_target: 100
   # Smooth only the follower gripper; arm joints still use the full control rate.
   gripper_speed_mm_s: 80
@@ -36,6 +64,10 @@ arm:
 annotations:
   segments: true
   segment_debounce_ms: 400
+
+# Non-blocking local Korean WAV cues for record/teleop state changes.
+audio:
+  enabled: true
 
 video:
   codec: h264

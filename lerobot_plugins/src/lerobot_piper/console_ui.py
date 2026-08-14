@@ -48,6 +48,16 @@ def phase(
     print(f"{tag} {message}", file=stream, flush=True)
 
 
+def announce(message: str, *, enabled: bool) -> None:
+    """Play a local status cue without making robot operation depend on audio."""
+    try:
+        from lerobot_piper.audio import play_cue
+
+        play_cue(message, enabled=enabled)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Voice announcement unavailable: %s", exc)
+
+
 def _replace_message(record: logging.LogRecord, message: str) -> None:
     # getMessage() has already applied %-style arguments. Clear them so the
     # formatter does not try to apply them a second time to the styled string.
@@ -101,11 +111,32 @@ def recording_log_style(
             _replace_message(record, paint(message, "magenta", bold=True, enabled=enabled))
             return record
 
+        initial_poses = re.fullmatch(r"INITIAL POSES\s+Episode (\d+) · (.+)", message)
+        if initial_poses:
+            message = (
+                f"◎ INITIAL POSES  Episode {initial_poses.group(1)}/{total_episodes} · "
+                f"{initial_poses.group(2)}"
+            )
+            _replace_message(record, paint(message, "green", bold=True, enabled=enabled))
+            return record
+
+        reset_episode = re.fullmatch(r"Reset the environment for episode (\d+)", message)
+        if reset_episode:
+            episode = int(reset_episode.group(1)) + 1
+            message = (
+                f"◆ RESET       Episode {episode}/{total_episodes} · use the fixed egoview poses"
+            )
+            _replace_message(record, paint(message, "cyan", bold=True, enabled=enabled))
+            return record
+
         transitions = {
-            "Reset the environment": ("◆ RESET       Reposition the object and arm", "cyan"),
+            "Reset the environment": ("◆ RESET       Reposition objects and arm", "cyan"),
             "Re-record episode": ("↻ RE-RECORD   Discarding the current take", "magenta"),
             "Stop recording": ("■ FINALIZING  Saving videos and metadata", "yellow"),
-            "Exiting": ("✓ DONE        Recorder closed safely", "green"),
+            # LeRobot emits "Exiting" from its cleanup path on both success
+            # and failure. Keep this neutral; record_cli prints COMPLETE only
+            # after record() actually returns without an exception.
+            "Exiting": ("◇ CLOSED      Hardware disconnected", "cyan"),
         }
         if message in transitions:
             text, tone = transitions[message]

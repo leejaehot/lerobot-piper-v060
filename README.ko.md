@@ -174,7 +174,16 @@ can_init
 piper_teleop --init-can
 ```
 
-최초 테스트에서는 환경 변수로 더 안전한 값을 지정할 수 있습니다.
+Teleop 기본값은 독립된 `configs/teleop.yaml`에서 읽습니다. 이 파일에 CAN 역할,
+제어·모니터링 주기, follower/gripper 제한, 오디오, egoview 카메라, reset grid,
+객체별 고정 pose가 들어갑니다. 다른 파일은 다음처럼 지정합니다.
+
+```bash
+piper_teleop --config ~/piper/configs/teleop.yaml
+```
+
+우선순위는 CLI, 환경 변수, YAML 순서입니다. 최초 테스트에서는 기존 환경 변수로
+더 안전한 값을 일시 지정할 수도 있습니다.
 
 ```bash
 PIPER_TELEOP_SPEED_PERCENT=20 \
@@ -184,6 +193,21 @@ piper_teleop
 
 전체 화면 터미널 대시보드에는 리더 목표값, 팔로워 qpos, 관절 추종 오차,
 그리퍼 위치, 플랜지 자세 및 제어 루프 속도가 표시됩니다.
+
+기본적으로 teleop 실행 시 카메라 전용 Rerun 화면도 함께 열립니다.
+`configs/teleop.yaml`의 egoview 카메라, 16×12 reset grid, 객체별 고정 initial
+pose를 읽고, 로봇팔의 200 Hz 제어 루프와 독립적으로 raw 영상을 10 Hz로
+갱신합니다. 이 기능은 시각화 전용이며 teleop 중 reset annotation을 저장하지
+않습니다.
+
+```bash
+PIPER_TELEOP_RERUN_FPS=15 piper_teleop
+piper_teleop --no-rerun
+```
+
+기본 config 경로는 `PIPER_TELEOP_CONFIG`로 바꿀 수 있습니다. Teleop은 기본적으로
+준비, safe-disconnect, disconnect 상태를 짧은 로컬 한국어 WAV로 안내합니다.
+`audio.enabled: false` 또는 `PIPER_TELEOP_SOUNDS=false piper_teleop`으로 끕니다.
 
 리더 그리퍼는 기본 teaching friction `5`를 사용합니다. 이 장비에서는 손으로
 조작하는 힘과 손을 놓았을 때의 위치 유지력을 절충한 값입니다. 팔로워
@@ -239,10 +263,117 @@ recording에서도 동일한 safe-disconnect Enter 확인과 그리퍼 설정이
 로컬 `configs/record.yaml`의 `arm` 항목에서 다음 값을 조정할 수 있습니다.
 
 ```yaml
+initial_setup:
+  wait_for_enter: true
+
 arm:
   gripper_speed_mm_s: 80
   leader_gripper_friction: 5
+  home_on_reset: true
+  home_speed_percent: 20
+  home_tolerance_degrees: 2
+
+audio:
+  enabled: true
 ```
+
+각 take가 끝나거나 폐기된 뒤에는 다음 episode 전에 follower만 Piper 물리
+zero/home으로 복귀시킵니다. Follower는 driver의 일반 `move_j()` 경로로
+`home_speed_percent` 속도에서 이동합니다. Leader firmware는 조회하지 않고,
+leader home 명령도 보내지 않으며, leader가 zero인지도 성공 조건에 넣지 않습니다.
+
+`dataset.reset_seconds`에는 home 복귀, 환경 재배치, 마지막 음성 countdown이 모두
+포함됩니다. 마지막 3초는 arm이 움직이지 않는 구간으로 예약합니다. Follower가
+`home_tolerance_degrees` 안에 연속 3회 들어와야 복귀 완료로 판단하며, 제한 시간
+안에 도달하지 못하면 잘못 정렬된 상태로 다음 episode를 시작하지 않고 recording을
+중단합니다. Episode 1 전의 최초 reset에서는 arm을 움직이지 않습니다.
+`--no-home-on-reset`을 사용하면 follower 복귀도 끌 수 있습니다.
+
+첫 episode 전에는 reset 화면을 계속 띄운 채 Enter 입력을 기다립니다. Rerun의
+10 Hz grid를 보면서 모든 객체를 배치하고 recording 터미널에 포커스를 둔 뒤
+Enter를 누르면 됩니다. 대기 중에도 leader→follower 제어는 200 Hz로 유지되며,
+Enter 이후 `Three`, `Two`, `One` 전용 countdown이 끝나야 녹화가 시작됩니다.
+초기 배치 단계의 Right/Left 발판은 확인 입력으로 처리하지 않습니다. 비대화형
+취득에서는 `initial_setup.wait_for_enter: false` 또는
+`piper_record --no-wait-for-enter`로 끌 수 있습니다.
+
+동적 에피소드 번호는 또렷한 영어 neural voice로 `Recording episode one`부터
+`Recording episode fifty`까지 안내합니다. 나머지는 `키프레임 1`부터
+`키프레임 10`, `환경 초기화`, `재녹화`, `취득 종료` 같은 짧은 한국어 상태어를
+사용합니다.
+환경 초기화의 마지막 3초에는 영어 `Three`, `Two`, `One`을 1초 간격으로 재생한
+뒤 다음 `Recording episode ...` 안내로 넘어갑니다. Reset이 조기에 끝나면 남은
+countdown도 즉시 취소됩니다. `키프레임`은
+Space 발판 입력이 실제 recording frame의
+segment boundary로 반영됐을 때만 재생되며, 디바운스로 무시되거나 recording 밖에서
+누른 입력에는 재생되지 않습니다. 미리 생성된 PCM WAV를 시스템 기본 출력으로 non-blocking
+재생하므로 recording 중에는 Speech Dispatcher나 온라인 TTS를 사용하지 않습니다.
+YAML 설정은 `piper_record --sounds` 또는 `piper_record --no-sounds`로 덮어쓸 수
+있습니다. 더 많은 에피소드 번호가 필요하면 다음처럼 다시 생성합니다.
+
+```bash
+uv run scripts/generate_voice_assets.py --max-episodes 50 --max-keyframes 10
+```
+
+### Egocentric reset 위치 grid
+
+`piper_record`는 Rerun의 egoview 위에 16 × 12 tabletop grid와 설정된 객체별 고정
+initial pose를 10 Hz로 투영합니다. Grid는 별도의 Rerun entity이므로 취득되는 원본
+카메라 영상에는 그려지지 않습니다. 모든 take에 동일한 설정 좌표를 표시하며,
+주변 좌표를 생성·추천하거나 순서를 섞지 않습니다.
+
+작업대의 네 모서리를 좌상단, 우상단, 우하단, 좌하단 순서의 정규화된 영상
+좌표로 설정합니다.
+
+```yaml
+reset_grid:
+  enabled: true
+  camera: egoview
+  columns: 16
+  rows: 12
+  corners:
+    - [0.12, 0.24]
+    - [0.88, 0.24]
+    - [0.95, 0.90]
+    - [0.05, 0.90]
+  initial_poses:
+    spam_can: [4, 6]
+    white_container: [[2, 2], [7, 2], [2, 9], [7, 9]]
+```
+
+현재 로컬 기본값의 화면 전체 네 모서리는 overlay 확인용입니다. 최종 데이터
+취득 전에는 반드시 실제 작업대/유효 작업영역의 네 모서리로 교체해야 합니다.
+Homography를 적용하므로 grid 간격은 영상 픽셀 간격이 아니라 평면 작업영역에서
+균등하게 배치됩니다. Initial pose는 0-based `[column, row]` 좌표입니다. 따라서
+16 × 12 grid의 column 범위는 `0..15`, row 범위는 `0..11`입니다.
+좌표 하나는 점으로 표시합니다. 축에 정렬된 네 모서리 좌표는 label이 있는
+박스로 표시하며 입력 순서는 상관없습니다. YAML에서는 `{...}`가 아니라 위와
+같은 중첩 list 문법을 사용합니다.
+
+모든 frame에는 동일한 fixed-pose vector가 저장됩니다. 점은 객체 key를 annotation
+이름으로 사용합니다. 박스의 네 모서리는 TL, TR, BR, BL 순서로 정규화되어
+`object.corner_1`부터 `object.corner_4`까지 저장됩니다.
+
+```text
+annotation.reset.initial_pose.position_id
+annotation.reset.initial_pose.grid_col
+annotation.reset.initial_pose.grid_row
+annotation.reset.initial_pose.x_norm
+annotation.reset.initial_pose.y_norm
+```
+
+`--no-grid`를 사용하면 grid 안내와 reset annotation 열을 함께 끌 수 있습니다.
+
+CAN이나 두 팔을 enable하지 않고 grid만 확인하거나 조정하려면 다음을 실행합니다.
+
+```bash
+piper_grid_preview
+```
+
+이 명령은 설정된 egoview 카메라 한 대만 연결하고, 관절 plot이 없는 camera-only
+Rerun layout을 만듭니다. 설정된 객체 pose를 동일한 10 Hz로 표시하며 `q` 또는
+`Esc`로 종료합니다. Jetson native Viewer의 안정성을 위해 preview는 항상 raw
+image를 사용합니다.
 
 ### 3발판 데이터 취득 제어
 
@@ -307,8 +438,9 @@ piper_record \
 제어 워커는 리더 명령을 200 Hz로 전달합니다. 데이터셋 행은 별도의 30 Hz
 절대 시간 스케줄에 따라 샘플링됩니다. 각 RealSense 카메라는 독립적인 백그라운드
 스레드에서 계속 프레임을 취득하고, 레코더는 가장 최신 프레임들을 스냅샷한 뒤
-같은 행에 들어갈 팔로워 상태를 읽습니다. Rerun에는 압축된 10 Hz 미리보기가
-전송되며 저장되는 프레임은 설정된 취득 품질을 유지합니다.
+같은 행에 들어갈 팔로워 상태를 읽습니다. 로컬 Rerun에는 Jetson native Viewer의
+JPEG decoder 경로를 피하기 위해 raw 10 Hz 미리보기가 전송되며, 저장되는
+프레임은 설정된 취득 품질을 유지합니다.
 
 이 방식은 일반적인 LeRobot 학습에 적합한 소프트웨어 동기화를 제공합니다.
 다만 독립된 RealSense 카메라 사이의 하드웨어 트리거 기반 동시 노출은 제공하지
@@ -324,6 +456,6 @@ HF_LEROBOT_HOME=/tmp/lerobot-test-data \
 pytest -q ~/piper/lerobot_plugins/tests ~/lerobot_v060/tests/test_control_robot.py
 ```
 
-현재 통합 테스트는 고속 제어, 발판 segment, 플러그인 시작 순서, 카메라
-샘플링, 터미널 UI, 데이터 취득 및 이어받기 경로를 포함한 19개 테스트를
-통과합니다.
+통합 테스트는 고속 제어, 발판 segment, 플러그인 시작 순서, 카메라 샘플링,
+터미널 UI, 공식 home reset, reset 위치 annotation, 데이터 취득 및 이어받기
+경로를 검증합니다.

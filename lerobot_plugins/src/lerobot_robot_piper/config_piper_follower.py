@@ -14,6 +14,8 @@ class PiperFollowerConfig(RobotConfig):
     speed_percent: int = 100
     gripper_speed_mm_s: float | None = 80.0
     terminal_update_hz: float = 30.0
+    play_sounds: bool = False
+    reset_grid_config_path: str | None = None
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -24,3 +26,5 @@ class PiperFollowerConfig(RobotConfig):
             raise ValueError("gripper_speed_mm_s must be positive or None")
         if self.terminal_update_hz < 0:
             raise ValueError("terminal_update_hz must be non-negative")
+        if not isinstance(self.play_sounds, bool):
+            raise ValueError("play_sounds must be true or false")

@@ -4,16 +4,20 @@ import logging
 import math
 import sys
 import time
+from contextlib import suppress
 from functools import cached_property
 from typing import Any
 
 from lerobot.cameras import make_cameras_from_configs
+from lerobot.cameras.realsense import RealSenseCameraConfig
 from lerobot.robots.robot import Robot
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.types import RobotAction, RobotObservation
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from lerobot_piper import PIPER_MOTORS, PiperMotorsBus
+from lerobot_piper.console_ui import announce
+from lerobot_piper.reset_grid import ResetGridGuide, load_reset_grid_settings
 
 from .config_piper_follower import PiperFollowerConfig
 
@@ -33,8 +37,34 @@ class PiperFollower(Robot):
     ) -> None:
         super().__init__(config)
         self.config = config
+        self._play_sounds = config.play_sounds
         self.bus = PiperMotorsBus(port=config.port, driver_factory=driver_factory)
-        self.cameras = make_cameras_from_configs(config.cameras)
+        camera_configs = dict(config.cameras)
+        self._reset_grid: ResetGridGuide | None = None
+        self._reset_grid_initialized = False
+        if config.reset_grid_config_path is not None:
+            settings = load_reset_grid_settings(config.reset_grid_config_path)
+            existing = camera_configs.get(settings.camera_name)
+            if existing is None:
+                camera_configs[settings.camera_name] = RealSenseCameraConfig(
+                    serial_number_or_name=settings.camera_serial,
+                    fps=settings.camera_fps,
+                    width=settings.image_width,
+                    height=settings.image_height,
+                    use_rgb=True,
+                    use_depth=False,
+                )
+            self._reset_grid = ResetGridGuide(
+                camera_name=settings.camera_name,
+                image_width=settings.image_width,
+                image_height=settings.image_height,
+                columns=settings.columns,
+                rows=settings.rows,
+                corners=settings.corners,
+                initial_poses=settings.initial_poses,
+                rerun_enabled=True,
+            )
+        self.cameras = make_cameras_from_configs(camera_configs)
         self._last_terminal_update_s = float("-inf")
         self._last_terminal_pose: list[float] | None = None
         self._terminal_loop_hz: float | None = None
@@ -84,6 +114,16 @@ class PiperFollower(Robot):
                 self.bus.disconnect(disable_torque=True)
             raise
         logger.info("%s follower motors enabled", self)
+        announce("ready", enabled=self._play_sounds)
+
+    def log_teleop_visualization(self, display_mode: str) -> None:
+        """Add the reset guide to the egoview image without recording annotations."""
+        if display_mode != "rerun" or self._reset_grid is None:
+            return
+        if not self._reset_grid_initialized:
+            self._reset_grid.on_phase(0, "reset")
+            self._reset_grid_initialized = True
+        self._reset_grid.log_visualization()
 
     @property
     def is_calibrated(self) -> bool:
@@ -94,6 +134,20 @@ class PiperFollower(Robot):
 
     def configure(self) -> None:
         self.bus.configure_follower(self.config.speed_percent)
+
+    @check_if_not_connected
+    def start_official_home(self, speed_percent: int) -> None:
+        self.bus.start_follower_official_home(speed_percent)
+
+    @check_if_not_connected
+    def is_at_official_home(self, tolerance_degrees: float) -> bool:
+        return self.bus.is_follower_at_official_home(
+            tolerance_degrees=tolerance_degrees,
+        )
+
+    @check_if_not_connected
+    def finish_official_home(self) -> None:
+        self.bus.restore_follower_speed()
 
     def setup_motors(self) -> None:
         self.bus.connect()
@@ -246,6 +300,7 @@ class PiperFollower(Robot):
 
     def prepare_for_disconnect(self) -> None:
         """Keep torque on until the operator confirms both arms are supported."""
+        # Restore the terminal before asking for the safe-disconnect Enter press.
         self.close_teleop_terminal()
         if not (
             self.config.disable_torque_on_disconnect
@@ -259,10 +314,20 @@ class PiperFollower(Robot):
             )
             return
 
+        announce(
+            "support_arms",
+            enabled=self._play_sounds,
+        )
         print("\n╭─ SAFE DISCONNECT ───────────────────────────────────╮")
         print("│ Follower torque is still ON.                        │")
         print("│ Support both arms, then press Enter to release it.  │")
         print("╰─────────────────────────────────────────────────────╯")
+        # A pynput-based initial-setup confirmation can leave its newline in the
+        # terminal buffer. Never let that stale key confirm torque release.
+        with suppress(Exception):
+            import termios
+
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
         while True:
             try:
                 input("Press Enter when both arms are supported: ")
@@ -280,4 +345,5 @@ class PiperFollower(Robot):
             if camera.is_connected:
                 camera.disconnect()
         self.bus.disconnect(self.config.disable_torque_on_disconnect)
+        announce("disconnected", enabled=self._play_sounds)
         logger.info("%s disconnected", self)

@@ -14,7 +14,9 @@ dependencies = [
 ]
 
 [project.scripts]
+piper_teleop = "lerobot_piper.teleop_cli:main"
 piper_record = "lerobot_piper.record_cli:main"
+piper_grid_preview = "lerobot_piper.grid_preview_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
