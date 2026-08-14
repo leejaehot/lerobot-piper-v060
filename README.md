@@ -174,7 +174,16 @@ Initialization configures 1 Mbit/s CAN and renames the adapters to
 piper_teleop --init-can
 ```
 
-Safer initial settings can be supplied through environment variables:
+Teleop reads its standalone defaults from `configs/teleop.yaml`. It contains
+the CAN roles, control and monitor rates, follower/gripper limits, audio,
+egoview camera, reset grid, and fixed object poses. Use another file with:
+
+```bash
+piper_teleop --config ~/piper/configs/teleop.yaml
+```
+
+CLI options override environment variables, which override the YAML. Safer
+one-off settings can still be supplied through environment variables:
 
 ```bash
 PIPER_TELEOP_SPEED_PERCENT=20 \
@@ -184,6 +193,22 @@ piper_teleop
 
 The full-screen terminal dashboard displays leader target, follower qpos,
 joint tracking error, gripper position, flange pose, and control-loop rate.
+
+Teleop also opens a camera-only Rerun view by default. It reads the egoview
+camera, 16×12 reset grid, and fixed per-object initial poses from
+`configs/teleop.yaml`, keeps the 200 Hz arm control loop independent, and
+refreshes raw Rerun frames at 10 Hz. This is visualization only; teleop does
+not write reset annotations. Useful overrides are:
+
+```bash
+PIPER_TELEOP_RERUN_FPS=15 piper_teleop
+piper_teleop --no-rerun
+```
+
+Set `PIPER_TELEOP_CONFIG` to change the default config path. Teleop plays short
+local Korean WAV cues for ready, safe-disconnect, and disconnected states by
+default. Set `audio.enabled: false` or use
+`PIPER_TELEOP_SOUNDS=false piper_teleop` to disable them.
 
 The leader gripper defaults to teaching friction `5`, a balance between hand
 effort and passive position holding on this hardware. A follower-only
@@ -238,10 +263,121 @@ Recording uses the same safe-disconnect Enter confirmation and gripper
 defaults. Adjust them in the local `configs/record.yaml` when necessary:
 
 ```yaml
+initial_setup:
+  wait_for_enter: true
+
 arm:
   gripper_speed_mm_s: 80
   leader_gripper_friction: 5
+  home_on_reset: true
+  home_speed_percent: 20
+  home_tolerance_degrees: 2
+
+audio:
+  enabled: true
 ```
+
+After every completed or discarded take, only the follower returns to Piper's
+physical zero/home before the next episode. It uses the driver's normal
+`move_j()` path at `home_speed_percent`. The home-reset path performs no leader
+firmware compatibility query, sends no leader home command, and never requires
+the leader to be at zero.
+
+`dataset.reset_seconds` includes the home move, scene reset, and final spoken
+countdown. The final three seconds are reserved as a motion-free window. The
+follower must remain within `home_tolerance_degrees` for three consecutive checks;
+otherwise recording stops before the next episode instead of resuming from an
+unsafe follower pose. The initial reset before episode 1 does not move either
+arm. Use `--no-home-on-reset` to disable the follower return.
+
+Before the first episode, the reset view stays live until Enter is pressed.
+Use the 10 Hz Rerun grid to place every object, focus the recording terminal,
+and press Enter. Leader-to-follower control remains at 200 Hz while waiting;
+Enter starts a dedicated `Three`, `Two`, `One` countdown and recording begins
+after it finishes. Right/Left pedals do not confirm this initial setup. Disable
+the gate with `initial_setup.wait_for_enter: false` or
+`piper_record --no-wait-for-enter` for non-interactive collection.
+
+Recording audio cues use clear English neural speech for the dynamic episode
+number (`Recording episode one` through `Recording episode fifty`) and short Korean
+status phrases such as `키프레임 1` through `키프레임 10`, `환경 초기화`,
+`재녹화`, and `취득 종료`.
+The final three seconds of environment reset play `Three`, `Two`, `One` at
+one-second intervals before the next `Recording episode ...` cue. An early
+reset exit cancels the remaining countdown.
+`키프레임` plays only after an
+accepted Space-pedal boundary is attached to a recorded frame; debounced or
+out-of-recording presses remain silent. The cues are cached PCM WAV files and launch
+non-blocking through the system default audio output; runtime recording never
+uses Speech Dispatcher or an online TTS service. Override the YAML with
+`piper_record --sounds` or `piper_record --no-sounds`. Regenerate the assets
+for more numbered episodes with:
+
+```bash
+uv run scripts/generate_voice_assets.py --max-episodes 50 --max-keyframes 10
+```
+
+### Egocentric reset-position grid
+
+`piper_record` projects a 16 × 12 tabletop grid and the fixed initial pose of
+each configured object over the egoview in Rerun at 10 Hz. The overlay is a
+separate Rerun entity: it is never burned into the recorded camera frames.
+The same configured poses are shown for every take; the recorder does not
+generate, recommend, or shuffle nearby positions.
+
+Configure the tabletop quadrilateral with normalized image coordinates in
+top-left, top-right, bottom-right, bottom-left order:
+
+```yaml
+reset_grid:
+  enabled: true
+  camera: egoview
+  columns: 16
+  rows: 12
+  corners:
+    - [0.12, 0.24]
+    - [0.88, 0.24]
+    - [0.95, 0.90]
+    - [0.05, 0.90]
+  initial_poses:
+    spam_can: [4, 6]
+    white_container: [[2, 2], [7, 2], [2, 9], [7, 9]]
+```
+
+The four full-frame corners in the local default are only a quick visual test.
+Replace them with the actual tabletop/workspace corners before collecting the
+final dataset. Perspective is handled by a homography, so equal grid steps
+represent equal steps on that planar workspace rather than equal image pixels.
+Initial poses use zero-based `[column, row]` coordinates, so a 16 × 12 grid
+accepts columns `0..15` and rows `0..11`.
+A single coordinate renders as a point. Four axis-aligned corner coordinates
+render as a labeled box; input order does not matter. YAML uses a nested list,
+not `{...}` mapping syntax.
+
+Every frame receives the same fixed-pose vectors. A point uses its object key
+as the annotation name. A box preserves all four normalized corners as
+`object.corner_1` through `object.corner_4`, ordered TL, TR, BR, BL:
+
+```text
+annotation.reset.initial_pose.position_id
+annotation.reset.initial_pose.grid_col
+annotation.reset.initial_pose.grid_row
+annotation.reset.initial_pose.x_norm
+annotation.reset.initial_pose.y_norm
+```
+
+Use `--no-grid` to disable both reset guidance and these annotation columns.
+
+To inspect or tune the grid without enabling CAN or either arm, run:
+
+```bash
+piper_grid_preview
+```
+
+This connects only the configured egoview camera and builds a camera-only Rerun
+layout. It shows the same fixed object poses at the configured 10 Hz rate; use
+`q` or `Esc` to quit. The preview always sends raw images for reliable native
+Viewer rendering on Jetson.
 
 ### Three-pedal recording controls
 
@@ -306,8 +442,9 @@ visualization overhead, and `NO_COLOR=1` to disable ANSI colors.
 The control worker relays leader commands at 200 Hz. Dataset rows are sampled on
 a separate 30 Hz absolute schedule. Each RealSense camera continuously captures
 in its own background thread; the recorder snapshots the newest frames and then
-reads follower state for the same row. Rerun receives a compressed 10 Hz preview
-while the stored frames retain their configured capture quality.
+reads follower state for the same row. The local Rerun Viewer receives a raw
+10 Hz preview to avoid the Jetson native Viewer's JPEG decoder path, while the
+stored frames retain their configured capture quality.
 
 This provides software synchronization suitable for standard LeRobot training.
 It does not provide hardware-triggered simultaneous exposure between independent
@@ -323,6 +460,6 @@ HF_LEROBOT_HOME=/tmp/lerobot-test-data \
 pytest -q ~/piper/lerobot_plugins/tests ~/lerobot_v060/tests/test_control_robot.py
 ```
 
-The current integration test suite passes 19 tests, including high-rate control,
-foot-pedal segments, plugin startup flow, camera sampling, terminal UI,
-recording, and resume paths.
+The integration tests cover high-rate control, foot-pedal segments, plugin
+startup flow, camera sampling, terminal UI, official home reset, guided reset
+annotations, recording, and resume paths.

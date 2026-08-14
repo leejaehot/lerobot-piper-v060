@@ -1,0 +1,38 @@
+# Copy this file to teleop.yaml and replace the camera serial.
+
+cameras:
+  egoview: "REPLACE_WITH_D435_SERIAL"
+
+reset_grid:
+  enabled: true
+  camera: egoview
+  columns: 16
+  rows: 12
+  corners:
+    - [0.0, 0.0]
+    - [1.0, 0.0]
+    - [1.0, 1.0]
+    - [0.0, 1.0]
+  initial_poses:
+    object: [4, 6]
+    target_container: [[9, 3], [14, 3], [9, 9], [14, 9]]
+
+capture:
+  dataset_fps: 30
+  control_fps: 200
+  status_hz: 30
+  width: 640
+  height: 480
+  rerun: true
+  rerun_fps: 10
+
+arm:
+  leader_can: can_leader
+  follower_can: can_follower
+  speed_percent: 100
+  max_relative_target: 100
+  gripper_speed_mm_s: 80
+  leader_gripper_friction: 5
+
+audio:
+  enabled: true

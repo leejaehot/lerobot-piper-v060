@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 configs/can_mapping.env
 configs/record.yaml
+configs/teleop.yaml
 logs/
 vendor/
 .venv/

@@ -20,6 +20,24 @@ CAN_INIT = PIPER_ROOT / "scripts/can_init"
 DEFAULT_LEROBOT_HOME = Path.home() / ".cache/huggingface/lerobot-v060-piper"
 
 
+class _ResetOnlyGuide:
+    """Force LeRobot's pre-episode reset phase without adding annotations."""
+
+    @property
+    def dataset_features(self) -> dict[str, dict[str, Any]]:
+        return {}
+
+    def annotations_for_episode(self, episode_index: int) -> dict[str, Any]:
+        del episode_index
+        return {}
+
+    def on_phase(self, episode_index: int, phase: str) -> None:
+        del episode_index, phase
+
+    def log_visualization(self) -> None:
+        return
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="piper_record",
@@ -34,9 +52,26 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, help="number of episodes")
     parser.add_argument("--seconds", type=float, help="recording seconds per episode")
     parser.add_argument("--reset-seconds", type=float, help="reset time between episodes")
+    parser.add_argument(
+        "--wait-for-enter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="wait for Enter after the initial object setup before episode 1",
+    )
     parser.add_argument("--dataset-fps", type=int, help="camera and dataset FPS")
     parser.add_argument("--control-fps", type=int, help="leader-to-follower control FPS")
     parser.add_argument("--speed", type=int, help="follower speed percent")
+    parser.add_argument(
+        "--home-on-reset",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="return only the follower to Piper's zero/home between episodes",
+    )
+    parser.add_argument(
+        "--home-speed",
+        type=int,
+        help="follower speed percent during the between-episode home move",
+    )
     parser.add_argument(
         "--gripper-speed-mm-s",
         type=float,
@@ -58,7 +93,19 @@ def _arguments() -> argparse.Namespace:
         type=int,
         help="minimum interval between accepted segment-boundary presses",
     )
+    parser.add_argument(
+        "--grid",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="show configured object initial poses on an egoview grid",
+    )
     parser.add_argument("--rerun", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--sounds",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="speak recording phase changes",
+    )
     parser.add_argument("--push-to-hub", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--yes", "-y", action="store_true", help="start without the confirmation prompt")
     parser.add_argument("--dry-run", action="store_true", help="show the effective recording plan only")
@@ -92,6 +139,9 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
     video = _section(data, "video")
     cameras = _section(data, "cameras")
     annotations = _section(data, "annotations")
+    reset_grid = _section(data, "reset_grid")
+    initial_setup = _section(data, "initial_setup")
+    audio = _section(data, "audio")
 
     def override(value: Any, fallback: Any) -> Any:
         return fallback if value is None else value
@@ -102,6 +152,11 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
         "episodes": override(args.episodes, dataset.get("episodes", 10)),
         "episode_seconds": override(args.seconds, dataset.get("episode_seconds", 90)),
         "reset_seconds": override(args.reset_seconds, dataset.get("reset_seconds", 60)),
+        "wait_for_enter": (
+            initial_setup.get("wait_for_enter", True)
+            if getattr(args, "wait_for_enter", None) is None
+            else args.wait_for_enter
+        ),
         "push_to_hub": dataset.get("push_to_hub", False)
         if args.push_to_hub is None
         else args.push_to_hub,
@@ -111,11 +166,29 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
         "width": capture.get("width", 640),
         "height": capture.get("height", 480),
         "rerun": capture.get("rerun", True) if args.rerun is None else args.rerun,
-        "rerun_compress_images": capture.get("rerun_compress_images", True),
+        # Local Jetson viewers can stall while decoding rapidly replaced JPEG
+        # EncodedImage entities. Raw images avoid that decoder path; compression
+        # remains available as an explicit opt-in for remote visualization.
+        "rerun_compress_images": capture.get("rerun_compress_images", False),
         "rerun_fps": capture.get("rerun_fps", 10),
+        "play_sounds": (
+            audio.get("enabled", True)
+            if getattr(args, "sounds", None) is None
+            else args.sounds
+        ),
         "leader_can": os.getenv("PIPER_LEADER_CAN", arm.get("leader_can", "can_leader")),
         "follower_can": os.getenv("PIPER_FOLLOWER_CAN", arm.get("follower_can", "can_follower")),
         "speed_percent": override(args.speed, arm.get("speed_percent", 100)),
+        "home_on_reset": (
+            arm.get("home_on_reset", True)
+            if getattr(args, "home_on_reset", None) is None
+            else args.home_on_reset
+        ),
+        "home_speed_percent": override(
+            getattr(args, "home_speed", None),
+            arm.get("home_speed_percent", 20),
+        ),
+        "home_tolerance_degrees": arm.get("home_tolerance_degrees", 2.0),
         "max_relative_target": arm.get("max_relative_target", 100),
         "gripper_speed_mm_s": override(
             args.gripper_speed_mm_s,
@@ -134,6 +207,21 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
             args.segment_debounce_ms,
             annotations.get("segment_debounce_ms", 400),
         ),
+        "reset_grid": {
+            "enabled": (
+                reset_grid.get("enabled", False)
+                if getattr(args, "grid", None) is None
+                else args.grid
+            ),
+            "camera": reset_grid.get("camera", "egoview"),
+            "columns": reset_grid.get("columns", 16),
+            "rows": reset_grid.get("rows", 12),
+            "corners": reset_grid.get(
+                "corners",
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            ),
+            "initial_poses": reset_grid.get("initial_poses", {}),
+        },
         "video": video,
     }
     if args.test:
@@ -154,10 +242,28 @@ def _validate(cfg: dict[str, Any]) -> None:
         raise ValueError("task must not be empty")
     if int(cfg["episodes"]) < 1 or float(cfg["episode_seconds"]) <= 0:
         raise ValueError("episodes and episode_seconds must be positive")
+    if not isinstance(cfg["wait_for_enter"], bool):
+        raise ValueError("initial_setup wait_for_enter must be true or false")
     if int(cfg["dataset_fps"]) < 1 or int(cfg["control_fps"]) < int(cfg["dataset_fps"]):
         raise ValueError("control_fps must be at least dataset_fps")
+    if not 0 < float(cfg["rerun_fps"]) <= int(cfg["dataset_fps"]):
+        raise ValueError("rerun_fps must be positive and no greater than dataset_fps")
     if not 1 <= int(cfg["speed_percent"]) <= 100:
         raise ValueError("speed_percent must be between 1 and 100")
+    if not isinstance(cfg["home_on_reset"], bool):
+        raise ValueError("home_on_reset must be true or false")
+    if not 1 <= int(cfg["home_speed_percent"]) <= 100:
+        raise ValueError("home_speed_percent must be between 1 and 100")
+    if float(cfg["home_tolerance_degrees"]) <= 0:
+        raise ValueError("home_tolerance_degrees must be positive")
+    if (
+        cfg["home_on_reset"]
+        and int(cfg["episodes"]) > 1
+        and float(cfg["reset_seconds"]) <= 3
+    ):
+        raise ValueError(
+            "reset_seconds must be greater than 3 when home_on_reset is enabled"
+        )
     if float(cfg["gripper_speed_mm_s"]) <= 0:
         raise ValueError("gripper_speed_mm_s must be positive")
     if not 1 <= int(cfg["leader_gripper_friction"]) <= 10:
@@ -169,6 +275,15 @@ def _validate(cfg: dict[str, Any]) -> None:
         raise ValueError("cameras must map readable names to numeric RealSense SDK serials")
     if len(set(map(str, cameras.values()))) != len(cameras):
         raise ValueError("camera serials must be unique")
+    reset_grid = cfg["reset_grid"]
+    if reset_grid["enabled"] and reset_grid["camera"] not in cameras:
+        raise ValueError(
+            f"reset_grid camera {reset_grid['camera']!r} is not present in cameras"
+        )
+    if not isinstance(reset_grid["initial_poses"], dict):
+        raise ValueError("reset_grid initial_poses must be a YAML mapping")
+    if not isinstance(cfg["play_sounds"], bool):
+        raise ValueError("audio enabled must be true or false")
 
 
 def _usb_realsense_count() -> int:
@@ -219,7 +334,7 @@ def _line(label: str, value: str, width: int = 68) -> list[str]:
     ]
 
 
-def _plan(cfg: dict[str, Any], *, test: bool) -> None:
+def _plan(cfg: dict[str, Any], *, test: bool, reset_grid_guide=None) -> None:
     camera_text = "  ·  ".join(f"{name} ({serial})" for name, serial in cfg["cameras"].items())
     output_name = f"{cfg['repo_id']}_{datetime.now():%Y%m%d_%H%M%S}"
     output_hint = f"$HF_LEROBOT_HOME/{output_name}"
@@ -229,6 +344,12 @@ def _plan(cfg: dict[str, Any], *, test: bool) -> None:
     rows += _line(
         "EPISODES",
         f"{cfg['episodes']} × {cfg['episode_seconds']}s  ·  reset {cfg['reset_seconds']}s",
+    )
+    rows += _line(
+        "FIRST START",
+        "object setup → Enter → 3-second countdown"
+        if cfg["wait_for_enter"]
+        else "timed reset (Enter confirmation OFF)",
     )
     rows += _line("CAMERAS", camera_text)
     rows += _line(
@@ -243,22 +364,49 @@ def _plan(cfg: dict[str, Any], *, test: bool) -> None:
         ),
     )
     rows += _line(
+        "HOME RESET",
+        (
+            f"Follower Piper zero · {cfg['home_speed_percent']}% · leader unchanged"
+            f" · tolerance {cfg['home_tolerance_degrees']:g}°"
+            if cfg["home_on_reset"]
+            else "OFF"
+        ),
+    )
+    rows += _line(
         "PEDALS",
         "← re-record  ·  Space next segment  ·  → next episode"
         if cfg["segments"]
         else "← re-record  ·  → next episode  ·  segments OFF",
     )
+    reset_grid = cfg["reset_grid"]
+    if reset_grid["enabled"]:
+        rows += _line(
+            "RESET GRID",
+            (
+                f"{reset_grid['camera']} · {reset_grid['columns']}×{reset_grid['rows']} points"
+                f" · {reset_grid_guide.num_positions} fixed object pose(s)"
+            ),
+        )
+        rows += _line(
+            "INITIAL",
+            (
+                " · ".join(pose.label for pose in reset_grid_guide.initial_poses)
+                or "no object poses configured"
+            ),
+        )
     rows += _line("OUTPUT", str(output_hint))
     rows += _line(
         "OPTIONS",
         (
             f"Rerun {'ON' if cfg['rerun'] else 'OFF'}"
             + (
-                f" ({cfg['rerun_fps']} Hz JPEG preview)"
-                if cfg["rerun"] and cfg["rerun_compress_images"]
+                f" ({cfg['rerun_fps']} Hz "
+                f"{'JPEG' if cfg['rerun_compress_images'] else 'raw'} preview)"
+                if cfg["rerun"]
                 else ""
             )
             + f"  ·  Hub upload {'ON' if cfg['push_to_hub'] else 'OFF'}"
+            + f"  ·  Voice {'ON' if cfg['play_sounds'] else 'OFF'}"
         ),
     )
 
@@ -315,6 +463,7 @@ def _record_config(cfg: dict[str, Any]):
             max_relative_target=float(cfg["max_relative_target"]),
             gripper_speed_mm_s=float(cfg["gripper_speed_mm_s"]),
             terminal_update_hz=0,
+            play_sounds=bool(cfg["play_sounds"]),
         ),
         teleop=PiperLeaderConfig(
             id="piper_leader",
@@ -342,7 +491,26 @@ def _record_config(cfg: dict[str, Any]):
         display_compressed_images=bool(cfg["rerun_compress_images"]),
         segment_annotation=bool(cfg["segments"]),
         segment_debounce_s=float(cfg["segment_debounce_ms"]) / 1_000,
-        play_sounds=False,
+        play_sounds=bool(cfg["play_sounds"]),
+    )
+
+
+def _reset_grid_guide(cfg: dict[str, Any]):
+    reset_grid = cfg["reset_grid"]
+    if not reset_grid["enabled"]:
+        return _ResetOnlyGuide() if cfg["wait_for_enter"] else None
+
+    from lerobot_piper.reset_grid import ResetGridGuide
+
+    return ResetGridGuide(
+        camera_name=str(reset_grid["camera"]),
+        image_width=int(cfg["width"]),
+        image_height=int(cfg["height"]),
+        columns=int(reset_grid["columns"]),
+        rows=int(reset_grid["rows"]),
+        corners=reset_grid["corners"],
+        initial_poses=reset_grid["initial_poses"],
+        rerun_enabled=bool(cfg["rerun"]),
     )
 
 
@@ -366,11 +534,12 @@ def main() -> None:
         cfg = _effective(_load(args.config), args)
         _validate(cfg)
         record_cfg = _record_config(cfg)
+        reset_grid_guide = _reset_grid_guide(cfg)
         if args.init_can:
             phase("CAN", "Initializing USB-CAN adapters")
             subprocess.run([str(CAN_INIT), *( ["--dry-run"] if args.dry_run else [] )], check=True)
             phase("CAN", "Leader and follower interfaces are ready", "green")
-        _plan(cfg, test=args.test)
+        _plan(cfg, test=args.test, reset_grid_guide=reset_grid_guide)
         if args.dry_run:
             phase("DRY RUN", "No hardware was activated", "green")
             return
@@ -383,11 +552,23 @@ def main() -> None:
                 phase("CANCELLED", "No hardware was activated", "yellow")
                 return
 
-        from lerobot.scripts.lerobot_record import record
+        from lerobot.scripts import lerobot_record
+        from lerobot_piper.audio import local_record_audio
 
         phase("CONNECT", "Starting cameras, follower, leader, and Rerun")
-        with recording_log_style(int(cfg["episodes"])):
-            dataset = record(record_cfg)
+        with local_record_audio(
+            lerobot_record,
+            enabled=bool(cfg["play_sounds"]),
+            home_on_reset=bool(cfg["home_on_reset"]),
+            home_speed_percent=int(cfg["home_speed_percent"]),
+            home_tolerance_degrees=float(cfg["home_tolerance_degrees"]),
+            wait_for_enter=bool(cfg["wait_for_enter"]),
+        ):
+            with recording_log_style(int(cfg["episodes"])):
+                dataset = lerobot_record.record(
+                    record_cfg,
+                    episode_annotation_provider=reset_grid_guide,
+                )
         phase("COMPLETE", "Dataset recording finished", "green")
         print(f"  Dataset:  {dataset.root}")
         print(f"  Episodes: {dataset.num_episodes}")

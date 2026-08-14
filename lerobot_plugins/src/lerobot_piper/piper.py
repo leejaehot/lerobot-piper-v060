@@ -28,6 +28,8 @@ PIPER_CALIBRATION = {
     "gripper": MotorCalibration(7, 0, 0, 0, 100_000),
 }
 
+PIPER_OFFICIAL_HOME_JOINTS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
 
 def _make_driver(port: str) -> Any:
     from pyAgxArm import AgxArmFactory, ArmModel, create_agx_arm_config
@@ -69,6 +71,7 @@ class PiperMotorsBus:
         self._target_joint_radians = [0.0] * 6
         self._target_gripper_m = 0.0
         self._follower_pose = [0.0] * 6
+        self._configured_speed_percent = 100
 
     @property
     def is_connected(self) -> bool:
@@ -237,7 +240,38 @@ class PiperMotorsBus:
         )
 
     def configure_follower(self, speed_percent: int) -> None:
+        self._configured_speed_percent = speed_percent
         self._driver.set_speed_percent(speed_percent)
+
+    def start_follower_official_home(self, speed_percent: int) -> None:
+        """Move the follower to Piper's physical zero pose."""
+        if not 1 <= speed_percent <= 100:
+            raise ValueError("home speed_percent must be in [1, 100]")
+        self._driver.set_speed_percent(speed_percent)
+        self._driver.move_j(list(PIPER_OFFICIAL_HOME_JOINTS))
+
+    def restore_follower_speed(self) -> None:
+        self._driver.set_speed_percent(self._configured_speed_percent)
+
+    def is_follower_at_official_home(
+        self,
+        *,
+        tolerance_degrees: float,
+    ) -> bool:
+        if tolerance_degrees <= 0:
+            raise ValueError("home tolerance_degrees must be positive")
+        message = self._driver.get_joint_angles()
+        if message is None:
+            return False
+        tolerance_radians = math.radians(tolerance_degrees)
+        return all(
+            abs(float(value) - target) <= tolerance_radians
+            for value, target in zip(
+                message.msg,
+                PIPER_OFFICIAL_HOME_JOINTS,
+                strict=True,
+            )
+        )
 
     def sync_read(self, data_name: str) -> dict[str, float]:
         if data_name != "Present_Position":
