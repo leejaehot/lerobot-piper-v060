@@ -5,6 +5,8 @@ __pycache__/
 configs/can_mapping.env
 configs/record.yaml
 configs/teleop.yaml
+configs/rollout.yaml
+*.code-workspace
 logs/
 vendor/
 .venv/

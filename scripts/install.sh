@@ -30,9 +30,13 @@ fi
 if [[ ! -f "$PIPER_ROOT/configs/teleop.yaml" ]]; then
     cp "$PIPER_ROOT/configs/teleop.example.yaml" "$PIPER_ROOT/configs/teleop.yaml"
 fi
+if [[ ! -f "$PIPER_ROOT/configs/rollout.yaml" ]]; then
+    cp "$PIPER_ROOT/configs/rollout.example.yaml" "$PIPER_ROOT/configs/rollout.yaml"
+fi
 
 echo
 echo "Installed Piper integration. Next steps:"
 echo "  1. can_init --configure --leader canX --follower canY"
 echo "  2. edit $PIPER_ROOT/configs/teleop.yaml and configs/record.yaml"
 echo "  3. piper_teleop --init-can"
+echo "  4. piper_rollout act --check"

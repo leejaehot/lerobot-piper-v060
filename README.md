@@ -123,8 +123,8 @@ source ~/piper/scripts/activate_lerobot_v060.sh
 `install.sh` applies [the small LeRobot patch](patches/lerobot-v0.6.0-piper.patch)
 to the local editable LeRobot checkout, installs this repository's
 `lerobot_robot_piper` distribution in editable mode, and creates a local
-recording configuration from the example when needed. Re-running it is safe
-when the patch is already present.
+teleop, recording, and rollout configuration from the examples when needed.
+Re-running it is safe when the patch is already present.
 
 LeRobot discovers installed distributions whose names begin with
 `lerobot_robot_` and imports them automatically. Importing
@@ -228,6 +228,46 @@ After `Ctrl-C`, torque remains on while a safe-disconnect prompt is shown.
 Support both arms—especially the follower—then press Enter to release torque
 and disconnect CAN. Non-interactive runs such as pipes or cron cannot wait for
 confirmation, so they log a warning and retain the previous shutdown behavior.
+
+## Roll out a trained policy
+
+`piper_rollout` wraps LeRobot's real-robot `lerobot-rollout` engine with Piper
+checkpoint validation and conservative hardware defaults. The installer copies
+`configs/rollout.example.yaml` to the local-only `configs/rollout.yaml`; update
+that file with this setup's two RealSense serials and the ACT and Diffusion
+Policy checkpoint paths under `~/lerobot_v060/outputs/policies`.
+Validate without connecting to the robot first:
+
+```bash
+piper_rollout act --dry-run
+piper_rollout act --check
+piper_rollout dp --check
+```
+
+`--check` loads the model, safetensors, and saved normalizer/unnormalizer on CUDA
+and runs one inference on black synthetic images. It does not open CAN, cameras,
+or motors. After that passes, clear the workspace, hold the E-stop, and start a
+bounded 30-second rollout:
+
+```bash
+piper_rollout act --init-can
+piper_rollout dp --init-can
+```
+
+Defaults match the 30 Hz training data while limiting the follower to 30% speed,
+`5` normalized joint units per tick, and `40 mm/s` gripper travel. Rerun is off
+for the first timing and safety run; enable it with `--rerun`. Before policy
+control, the follower aligns at 20% speed to the `piper_teleop` demonstration
+start pose (official-home joints with the gripper closed) and must remain within
+tolerance for three consecutive samples. Use `--no-align-start` to skip this,
+or `--align-speed` and `--align-timeout` to override its motion settings. The
+pose and tolerances are configurable under `teleop_initial_pose` in
+`configs/rollout.yaml`. On `Ctrl-C` or the duration limit, the follower returns
+smoothly to this aligned startup pose and then waits for support confirmation
+before releasing torque. Edit
+`configs/rollout.yaml` or use CLI overrides to change checkpoint paths, task,
+cameras, or limits. Non-interactive execution is rejected unless `--yes` is
+provided explicitly.
 
 ## Configure recording
 
@@ -371,13 +411,15 @@ Use `--no-grid` to disable both reset guidance and these annotation columns.
 To inspect or tune the grid without enabling CAN or either arm, run:
 
 ```bash
-piper_grid_preview
+piper_vis
 ```
 
 This connects only the configured egoview camera and builds a camera-only Rerun
 layout. It shows the same fixed object poses at the configured 10 Hz rate; use
 `q` or `Esc` to quit. The preview always sends raw images for reliable native
-Viewer rendering on Jetson.
+Viewer rendering on Jetson. It never connects CAN, the leader, or the follower.
+Pass another config with `piper_vis --config configs/teleop.yaml`. The existing
+`piper_grid_preview` command remains available as a compatibility alias.
 
 ### Three-pedal recording controls
 

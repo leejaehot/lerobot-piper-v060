@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+
+from lerobot_piper.grid_preview_cli import main
+
+main()

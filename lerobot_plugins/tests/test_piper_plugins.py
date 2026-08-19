@@ -44,6 +44,8 @@ class FakeGripper:
 
     def move_gripper_m(self, value: float, force: float) -> None:
         self.driver.gripper_commands.append((value, force))
+        if self.driver.follow_gripper_commands:
+            self.driver.follower_gripper_m = value
 
     def get_gripper_teaching_pendant_param(
         self,
@@ -91,6 +93,8 @@ class FakePyAgxArm:
         self.follower_joint_raw = list(self.leader_joint_raw)
         self.leader_gripper_m = 0.0255
         self.follower_gripper_m = 0.05
+        self.follow_gripper_commands = False
+        self.follow_joint_commands = True
         self.flange_pose = [0.3, 0.1, 0.2, 0.01, 0.02, 0.03]
         self.joint_commands: list[list[float]] = []
         self.gripper_commands: list[tuple[float, float]] = []
@@ -157,7 +161,10 @@ class FakePyAgxArm:
 
     def move_j(self, joints: list[float]) -> None:
         self.joint_commands.append(joints)
-        self.follower_joint_raw = [round(math.degrees(value) * 1000) for value in joints]
+        if self.follow_joint_commands:
+            self.follower_joint_raw = [
+                round(math.degrees(value) * 1000) for value in joints
+            ]
 
     def set_leader_mode(self) -> None:
         self.calls.append("set_leader")
@@ -262,6 +269,101 @@ def test_official_home_moves_only_follower_and_restores_speed() -> None:
 
     follower_bus.restore_follower_speed()
     assert follower_driver.calls[-1] == "speed:80"
+
+
+def test_follower_connect_aligns_recording_startup_pose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("lerobot_piper.piper.time.sleep", lambda _: None)
+    driver = FakePyAgxArm()
+    driver.follow_gripper_commands = True
+    startup_pose = {
+        "joint1": 0.0,
+        "joint2": -100.0,
+        "joint3": 100.0,
+        "joint4": 0.0,
+        "joint5": 0.0,
+        "joint6": -13.0434782609,
+        "gripper": 0.0,
+    }
+    follower = PiperFollower(
+        PiperFollowerConfig(
+            id="follower",
+            port="can_follower",
+            cameras={},
+            speed_percent=30,
+            startup_pose=startup_pose,
+            startup_pose_speed_percent=20,
+        ),
+        driver_factory=lambda _: driver,
+    )
+
+    follower.connect()
+
+    assert driver.joint_commands[-1] == pytest.approx([0.0] * 6)
+    assert driver.gripper_commands[-1] == pytest.approx((0.0, 1.0))
+    assert [call for call in driver.calls if call.startswith("speed:")] == [
+        "speed:30",
+        "speed:20",
+        "speed:30",
+    ]
+    assert follower.get_observation() == pytest.approx(
+        {f"{name}.pos": value for name, value in startup_pose.items()},
+        abs=1e-6,
+    )
+
+
+def test_startup_pose_validation_rejects_incomplete_or_out_of_range_pose() -> None:
+    with pytest.raises(ValueError, match="exactly joint1..joint6 and gripper"):
+        PiperFollowerConfig(
+            port="can_follower",
+            startup_pose={"joint1": 0.0},
+        )
+    with pytest.raises(ValueError, match="startup_pose.gripper"):
+        PiperFollowerConfig(
+            port="can_follower",
+            startup_pose={
+                **{f"joint{index}": 0.0 for index in range(1, 7)},
+                "gripper": -1.0,
+            },
+        )
+
+
+def test_startup_alignment_timeout_disables_torque_and_disconnects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("lerobot_piper.piper.time.sleep", lambda _: None)
+    driver = FakePyAgxArm()
+    driver.follow_joint_commands = False
+    follower = PiperFollower(
+        PiperFollowerConfig(
+            port="can_follower",
+            cameras={},
+            speed_percent=30,
+            startup_pose={
+                "joint1": 0.0,
+                "joint2": -100.0,
+                "joint3": 100.0,
+                "joint4": 0.0,
+                "joint5": 0.0,
+                "joint6": -13.0434782609,
+                "gripper": 0.0,
+            },
+            startup_pose_timeout_s=0.001,
+        ),
+        driver_factory=lambda _: driver,
+    )
+
+    with pytest.raises(RuntimeError, match="did not reach the startup pose"):
+        follower.connect()
+
+    assert [call for call in driver.calls if call.startswith("speed:")] == [
+        "speed:30",
+        "speed:20",
+        "speed:30",
+    ]
+    assert driver.calls[-2:] == ["disable", "disconnect"]
+    assert not follower.is_connected
 
 
 def test_follower_enables_reads_and_sends_with_v060_safety_clamp(

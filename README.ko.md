@@ -123,8 +123,8 @@ source ~/piper/scripts/activate_lerobot_v060.sh
 `install.sh`는 [작은 LeRobot 패치](patches/lerobot-v0.6.0-piper.patch)를
 로컬 editable LeRobot 체크아웃에 적용하고, 이 저장소의
 `lerobot_robot_piper` 배포 패키지를 editable 모드로 설치하며, 필요한 경우
-예제에서 로컬 녹화 설정을 생성합니다. 패치가 이미 적용된 상태에서 다시 실행해도
-안전합니다.
+예제에서 로컬 teleop, 녹화, rollout 설정을 생성합니다. 패치가 이미 적용된 상태에서
+다시 실행해도 안전합니다.
 
 LeRobot은 이름이 `lerobot_robot_`으로 시작하는 설치된 배포 패키지를 찾아
 자동으로 import합니다. `lerobot_robot_piper`를 import하면
@@ -228,6 +228,43 @@ friction 값은 `1~10`이며 높을수록 손힘은 줄지만 자연스럽게 �
 두 팔, 특히 follower를 손으로 지지한 뒤 Enter를 눌러야 토크가 해제되고 CAN이
 disconnect됩니다. 파이프나 cron처럼 stdin이 터미널이 아닌 실행에서는 확인을
 기다릴 수 없으므로 경고 후 기존처럼 종료합니다.
+
+## 학습된 policy rollout
+
+`piper_rollout`은 LeRobot의 실로봇 `lerobot-rollout` 엔진을 Piper용 안전 설정과
+함께 실행합니다. 설치 시 `configs/rollout.example.yaml`을 로컬 전용
+`configs/rollout.yaml`로 복사합니다. 이 파일에 장비의 두 RealSense 시리얼과
+`~/lerobot_v060/outputs/policies` 아래 ACT/DP 체크포인트 경로를 입력합니다. 먼저
+로봇을 연결하지 않는 검증을 실행합니다.
+
+```bash
+piper_rollout act --dry-run
+piper_rollout act --check
+piper_rollout dp --check
+```
+
+`--check`는 CUDA에서 모델, safetensors, 저장된 normalizer/unnormalizer를 불러오고
+검은 합성 영상으로 추론 한 번을 실행하지만 CAN, 카메라, 모터에는 연결하지 않습니다.
+검증 후 작업 공간을 비우고 비상 정지 버튼을 잡은 상태에서 제한된 30초 rollout을
+시작합니다.
+
+```bash
+piper_rollout act --init-can
+piper_rollout dp --init-can
+```
+
+초기값은 학습 데이터와 같은 30 Hz이며 follower 속도 30%, tick당 정규화 관절 변화
+`5`, gripper `40 mm/s`로 제한됩니다. 최초 rollout에서는 성능 영향을 피하려고
+Rerun을 끄며 `--rerun`으로 켤 수 있습니다. Policy 제어 전에는 follower를 데이터
+취득의 `piper_teleop` 시작 자세(official home 관절 + 닫힌 gripper)로 20% 속도에서
+정렬하고, 허용 오차 안에 3회 연속 들어온 뒤 rollout을 시작합니다. 이 자동 정렬을
+생략하려면 `--no-align-start`, 정렬 속도와 timeout을 바꾸려면 각각 `--align-speed`,
+`--align-timeout`을 사용합니다. 자세와 허용 오차는 `configs/rollout.yaml`의
+`teleop_initial_pose`에서 수정할 수 있습니다. `Ctrl-C` 또는 제한 시간 종료 시 정렬된
+시작 pose로 부드럽게 복귀한 다음, follower를 지지하고 Enter를 눌러야 토크가 해제됩니다.
+경로, task, 카메라 또는 제한값은 `configs/rollout.yaml`에서 바꾸거나 CLI 옵션으로
+덮어쓸 수 있습니다. 비대화형 실행은 우발적인 시작을 막기 위해 명시적인 `--yes`가
+없으면 거부됩니다.
 
 ## 데이터 취득 설정
 
@@ -367,13 +404,15 @@ annotation.reset.initial_pose.y_norm
 CAN이나 두 팔을 enable하지 않고 grid만 확인하거나 조정하려면 다음을 실행합니다.
 
 ```bash
-piper_grid_preview
+piper_vis
 ```
 
 이 명령은 설정된 egoview 카메라 한 대만 연결하고, 관절 plot이 없는 camera-only
 Rerun layout을 만듭니다. 설정된 객체 pose를 동일한 10 Hz로 표시하며 `q` 또는
 `Esc`로 종료합니다. Jetson native Viewer의 안정성을 위해 preview는 항상 raw
-image를 사용합니다.
+image를 사용합니다. CAN, leader, follower에는 연결하지 않습니다. 다른 설정을
+확인하려면 `piper_vis --config configs/teleop.yaml`처럼 지정할 수 있습니다.
+기존 `piper_grid_preview` 명령도 호환용 alias로 계속 사용할 수 있습니다.
 
 ### 3발판 데이터 취득 제어
 
