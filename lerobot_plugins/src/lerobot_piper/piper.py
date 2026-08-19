@@ -29,6 +29,8 @@ PIPER_CALIBRATION = {
 }
 
 PIPER_OFFICIAL_HOME_JOINTS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+STARTUP_POSE_POLL_INTERVAL_S = 0.05
+STARTUP_POSE_STABLE_SAMPLES = 3
 
 
 def _make_driver(port: str) -> Any:
@@ -242,6 +244,69 @@ class PiperMotorsBus:
     def configure_follower(self, speed_percent: int) -> None:
         self._configured_speed_percent = speed_percent
         self._driver.set_speed_percent(speed_percent)
+
+    def move_follower_to_normalized_pose(
+        self,
+        pose: dict[str, float],
+        *,
+        speed_percent: int,
+        timeout_s: float,
+        joint_tolerance_degrees: float,
+        gripper_tolerance_mm: float,
+    ) -> float:
+        """Move follower joints and gripper to a normalized startup pose and verify it."""
+        if not 1 <= speed_percent <= 100:
+            raise ValueError("startup pose speed_percent must be in [1, 100]")
+        if timeout_s <= 0:
+            raise ValueError("startup pose timeout_s must be positive")
+        if joint_tolerance_degrees <= 0 or gripper_tolerance_mm <= 0:
+            raise ValueError("startup pose tolerances must be positive")
+
+        raw = self._unnormalize(pose)
+        target_joints = [
+            math.radians(raw[f"joint{index}"] * 0.001) for index in range(1, 7)
+        ]
+        target_gripper_m = raw["gripper"] * 1e-6
+        joint_tolerance_radians = math.radians(joint_tolerance_degrees)
+        gripper_tolerance_m = gripper_tolerance_mm * 1e-3
+        start = time.monotonic()
+        stable_samples = 0
+
+        try:
+            self._driver.set_speed_percent(speed_percent)
+            self._target_joint_radians = list(target_joints)
+            self._target_gripper_m = target_gripper_m
+            self._driver.move_j(target_joints)
+            self._gripper.move_gripper_m(value=target_gripper_m, force=1.0)
+            while time.monotonic() - start < timeout_s:
+                joints = self._driver.get_joint_angles()
+                gripper = self._gripper.get_gripper_status()
+                at_target = joints is not None and gripper is not None
+                if at_target:
+                    at_target = all(
+                        abs(float(value) - target) <= joint_tolerance_radians
+                        for value, target in zip(joints.msg, target_joints, strict=True)
+                    ) and (
+                        abs(float(gripper.msg.value) - target_gripper_m)
+                        <= gripper_tolerance_m
+                    )
+                stable_samples = stable_samples + 1 if at_target else 0
+                if stable_samples >= STARTUP_POSE_STABLE_SAMPLES:
+                    self.get_action()
+                    return time.monotonic() - start
+                time.sleep(STARTUP_POSE_POLL_INTERVAL_S)
+        finally:
+            self.restore_follower_speed()
+
+        actual = self.get_action()
+        differences = ", ".join(
+            f"{name}={actual[name] - float(target):+.1f}"
+            for name, target in pose.items()
+        )
+        raise RuntimeError(
+            f"Follower did not reach the startup pose within {timeout_s:g}s "
+            f"(normalized error: {differences})"
+        )
 
     def start_follower_official_home(self, speed_percent: int) -> None:
         """Move the follower to Piper's physical zero pose."""

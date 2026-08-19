@@ -102,11 +102,29 @@ class PiperFollower(Robot):
             if not self.bus.enable_torque():
                 raise RuntimeError(f"{self} failed to enable follower motors")
             self.configure()
+            if self.config.startup_pose is not None:
+                logger.info(
+                    "%s aligning follower to startup pose at %d%% speed",
+                    self,
+                    self.config.startup_pose_speed_percent,
+                )
+                elapsed_s = self.bus.move_follower_to_normalized_pose(
+                    self.config.startup_pose,
+                    speed_percent=self.config.startup_pose_speed_percent,
+                    timeout_s=self.config.startup_pose_timeout_s,
+                    joint_tolerance_degrees=(
+                        self.config.startup_pose_joint_tolerance_degrees
+                    ),
+                    gripper_tolerance_mm=(
+                        self.config.startup_pose_gripper_tolerance_mm
+                    ),
+                )
+                logger.info("%s startup pose aligned in %.2fs", self, elapsed_s)
             self._last_gripper_target = None
             self._last_action_time_s = None
             for camera in self.cameras.values():
                 camera.connect()
-        except Exception:
+        except BaseException:
             for camera in self.cameras.values():
                 if camera.is_connected:
                     camera.disconnect()

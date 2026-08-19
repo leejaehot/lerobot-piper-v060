@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import logging
+import os
 import sys
 import time
 import traceback
@@ -14,10 +14,32 @@ from lerobot_piper.record_cli import DEFAULT_CONFIG, _load, _section
 from lerobot_piper.reset_grid import ResetGridGuide
 
 
+def _init_owned_rerun() -> Any:
+    """Start a viewer tied to this short-lived command instead of detaching it."""
+    import rerun as rr
+    from rerun.experimental import ViewerClient
+
+    from lerobot.utils.rerun_visualization import log_rerun_data
+
+    log_rerun_data.blueprint = None
+    os.environ.setdefault("RERUN_FLUSH_NUM_BYTES", "8000")
+    rr.init("piper_vis")
+    viewer = ViewerClient.spawn(
+        memory_limit=os.getenv("LEROBOT_RERUN_MEMORY_LIMIT", "10%"),
+        detach_process=False,
+    )
+    try:
+        rr.connect_grpc(url=viewer.url)
+    except Exception:
+        viewer.close()
+        raise
+    return viewer
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="piper_grid_preview",
-        description="Preview the egoview reset grid in Rerun without connecting either arm.",
+        prog="piper_vis",
+        description="Open the Piper camera and reset-grid viewer without connecting either arm.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="recording YAML")
@@ -60,6 +82,7 @@ def main() -> None:
     args = _arguments()
     camera = None
     listener = None
+    viewer = None
     visualization_started = False
     try:
         cfg = _settings(_load(args.config), args)
@@ -67,7 +90,6 @@ def main() -> None:
         from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
         from lerobot.utils.keyboard_input import create_key_listener
         from lerobot.utils.visualization_utils import (
-            init_visualization,
             log_visualization_data,
             shutdown_visualization,
         )
@@ -104,7 +126,7 @@ def main() -> None:
         )
         phase("CAMERA", f"Connecting RealSense {cfg['serial']}")
         camera.connect()
-        init_visualization("rerun", session_name="piper_grid_preview")
+        viewer = _init_owned_rerun()
         visualization_started = True
 
         stop = Event()
@@ -150,8 +172,12 @@ def main() -> None:
             listener.stop()
         if camera is not None and camera.is_connected:
             camera.disconnect()
-        if visualization_started:
-            shutdown_visualization("rerun")
+        try:
+            if visualization_started:
+                shutdown_visualization("rerun")
+        finally:
+            if viewer is not None:
+                viewer.close()
 
 
 if __name__ == "__main__":

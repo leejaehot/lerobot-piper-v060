@@ -1,0 +1,53 @@
+policy:
+  default: act
+  lerobot_root: ~/lerobot_v060
+  checkpoints:
+    act: outputs/policies/piper_cider_100demos/act_c50_vae_100k
+    dp: outputs/policies/piper_cider_100demos/dp_100k
+  device: cuda
+  use_amp: false
+  use_torch_compile: false
+  disable_pretrained_backbone_download: true
+
+rollout:
+  task: Pick up the object and place it in the target container.
+  seconds: 30
+  fps: 30
+  interpolation_multiplier: 1
+  rerun: false
+  rerun_compress_images: false
+  return_to_start: true
+
+teleop_initial_pose:
+  enabled: true
+  speed_percent: 20
+  timeout_seconds: 20
+  joint_tolerance_degrees: 2
+  gripper_tolerance_mm: 2
+  normalized:
+    joint1: 0.0
+    joint2: -100.0
+    joint3: 100.0
+    joint4: 0.0
+    joint5: 0.0
+    joint6: -13.0434782609
+    gripper: 0.0
+
+cameras:
+  egoview: "REPLACE_WITH_D435_SERIAL"
+  wristcam: "REPLACE_WITH_D405_SERIAL"
+
+capture:
+  camera_fps: 30
+  width: 640
+  height: 480
+
+arm:
+  follower_can: can_follower
+  speed_percent: 30
+  max_relative_target: 5
+  gripper_speed_mm_s: 40
+  wait_for_support: true
+
+audio:
+  enabled: true

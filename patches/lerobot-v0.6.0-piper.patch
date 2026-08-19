@@ -35,6 +35,20 @@ index 29cb1e5e..797068ce 100644
          devices = context.query_devices()
  
          for device in devices:
+diff --git a/src/lerobot/rollout/strategies/core.py b/src/lerobot/rollout/strategies/core.py
+index 460ad12e..2bccc619 100644
+--- a/src/lerobot/rollout/strategies/core.py
++++ b/src/lerobot/rollout/strategies/core.py
+@@ -130,6 +130,9 @@ class RolloutStrategy(abc.ABC):
+                 logger.info(
+                     "Skipping return-to-initial-position (disabled by config); leaving robot in final pose."
+                 )
++            prepare_disconnect = getattr(robot, "prepare_for_disconnect", None)
++            if callable(prepare_disconnect):
++                prepare_disconnect()
+             logger.info("Disconnecting robot...")
+             robot.disconnect()
+         teleop = hw.teleop
 diff --git a/src/lerobot/scripts/lerobot_record.py b/src/lerobot/scripts/lerobot_record.py
 index 4233f0bc..2cda6a0e 100644
 --- a/src/lerobot/scripts/lerobot_record.py
@@ -1122,3 +1136,41 @@ index dd10c0c1..6a39f681 100644
  def test_record_and_resume(tmp_path):
      robot_cfg = MockRobotConfig()
      teleop_cfg = MockTeleopConfig()
+diff --git a/tests/test_rollout.py b/tests/test_rollout.py
+index 85a29ff4..40934f5f 100644
+--- a/tests/test_rollout.py
++++ b/tests/test_rollout.py
+@@ -17,7 +17,7 @@
+ from __future__ import annotations
+ 
+ import dataclasses
+-from unittest.mock import MagicMock
++from unittest.mock import MagicMock, call
+ 
+ import pytest
+ import torch
+@@ -227,6 +227,24 @@ def test_create_strategy_unknown_raises():
+         create_strategy(cfg)
+ 
+ 
++def test_strategy_teardown_calls_robot_prepare_before_disconnect():
++    from lerobot.rollout import BaseStrategy, BaseStrategyConfig, HardwareContext
++
++    robot = MagicMock()
++    robot.is_connected = True
++    robot_wrapper = MagicMock()
++    robot_wrapper.inner = robot
++    hardware = HardwareContext(robot_wrapper=robot_wrapper, teleop=None)
++
++    strategy = BaseStrategy(BaseStrategyConfig())
++    strategy._teardown_hardware(hardware, return_to_initial_position=False)
++
++    assert robot.method_calls == [
++        call.prepare_for_disconnect(),
++        call.disconnect(),
++    ]
++
++
+ # ---------------------------------------------------------------------------
+ # Inference factory
+ # ---------------------------------------------------------------------------
