@@ -1,0 +1,7 @@
+profile:
+  description: Hanyang lemon-to-red-plate · 100 episodes · 30 Hz
+
+dataset:
+  lerobot_root: ~/lerobot_v060
+  repo_id: oms524/place_lemon_on_the_red_plate_30hz_piper_norm_v1
+  root: datasets/hyu/place_lemon_on_the_red_plate_30hz_piper_norm_v1

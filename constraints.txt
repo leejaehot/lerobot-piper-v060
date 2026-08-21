@@ -1,0 +1,21 @@
+# Tested application-layer versions shared by Ubuntu x86_64 and Jetson aarch64.
+# PyTorch, TorchVision, TorchCodec, and pyrealsense2 are intentionally excluded:
+# their wheels must match the host architecture, CUDA stack, and JetPack release.
+av==15.1.0
+datasets==4.8.5
+deepdiff==8.6.2
+diffusers==0.35.2
+draccus==0.10.0
+einops==0.8.2
+gymnasium==1.3.0
+huggingface_hub==1.25.1
+numpy==2.2.6
+opencv-python-headless==4.13.0.92
+pillow==12.3.0
+pyarrow==25.0.0
+pynput==1.8.2
+pyserial==3.5
+PyYAML==6.0.3
+rerun-sdk==0.33.1
+safetensors==0.8.0
+tqdm==4.69.1

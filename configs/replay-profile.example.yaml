@@ -1,0 +1,8 @@
+# Copy to configs/replays/my_dataset.yaml and edit the values below.
+profile:
+  description: My lab · pick and place dataset
+
+dataset:
+  lerobot_root: ~/lerobot_v060
+  repo_id: local/pick_and_place
+  root: /ABSOLUTE/PATH/TO/LEROBOT/DATASET

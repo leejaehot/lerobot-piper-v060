@@ -127,9 +127,11 @@ class PiperFollower(Robot):
         except BaseException:
             for camera in self.cameras.values():
                 if camera.is_connected:
-                    camera.disconnect()
+                    with suppress(Exception):
+                        camera.disconnect()
             if self.bus.is_connected:
-                self.bus.disconnect(disable_torque=True)
+                with suppress(Exception):
+                    self.bus.disconnect(disable_torque=True)
             raise
         logger.info("%s follower motors enabled", self)
         announce("ready", enabled=self._play_sounds)
@@ -358,10 +360,19 @@ class PiperFollower(Robot):
 
     @check_if_not_connected
     def disconnect(self) -> None:
-        self.close_teleop_terminal()
+        cleanup_errors: list[Exception] = []
+        try:
+            self.close_teleop_terminal()
+        except Exception as exc:
+            cleanup_errors.append(exc)
         for camera in self.cameras.values():
             if camera.is_connected:
-                camera.disconnect()
+                try:
+                    camera.disconnect()
+                except Exception as exc:
+                    cleanup_errors.append(exc)
         self.bus.disconnect(self.config.disable_torque_on_disconnect)
         announce("disconnected", enabled=self._play_sounds)
         logger.info("%s disconnected", self)
+        if cleanup_errors:
+            raise ExceptionGroup("Piper disconnected with cleanup error(s)", cleanup_errors)

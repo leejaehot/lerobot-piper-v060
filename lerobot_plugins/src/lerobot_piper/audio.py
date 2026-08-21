@@ -15,8 +15,8 @@ from lerobot_piper.home_reset import (
     run_follower_home_reset,
     wait_for_initial_setup,
 )
+from lerobot_piper.project_paths import PIPER_ROOT
 
-PIPER_ROOT = Path(__file__).resolve().parents[3]
 SOUND_DIR = PIPER_ROOT / "assets/sounds"
 
 _CUE_FILES = {

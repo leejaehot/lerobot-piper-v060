@@ -1,0 +1,34 @@
+profile:
+  description: Hanyang lemon-to-red-plate · Diffusion Policy h64/a32
+  camera_aliases:
+    front: egoview
+    right: wristcam
+
+policy:
+  default: hyu_dp
+  checkpoints:
+    hyu_dp: outputs/policies/hyu/dp_latest
+
+rollout:
+  task: Place the lemon on the red plate.
+
+# Mean frame-0 observation.state over all 100 HYU training episodes. The ACT
+# and DP checkpoints were trained on the same demonstrations.
+teleop_initial_pose:
+  enabled: true
+  speed_percent: 20
+  timeout_seconds: 20
+  joint_tolerance_degrees: 2
+  gripper_tolerance_mm: 2
+  normalized:
+    joint1: 12.0339
+    joint2: -47.0460
+    joint3: 40.0324
+    joint4: -0.0933
+    joint5: 97.9505
+    joint6: -4.0841
+    gripper: 63.6307
+
+arm:
+  speed_percent: 20
+  max_relative_target: 3

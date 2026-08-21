@@ -4,14 +4,15 @@ import os
 import sys
 from pathlib import Path
 
+from lerobot_piper.project_paths import PIPER_ROOT
+
 
 def _script_path() -> Path:
-    piper_root = Path(os.getenv("PIPER_ROOT", Path(__file__).resolve().parents[3]))
-    return piper_root / "scripts" / "piper_teleop.sh"
+    return PIPER_ROOT / "scripts" / "teleop_backend.sh"
 
 
 def main() -> None:
-    """Run the shared Piper teleop launcher from an installed console entry point."""
+    """Run the internal teleop backend from the installed console entry point."""
     script = _script_path()
     if not script.is_file():
         raise SystemExit(f"Piper teleop launcher does not exist: {script}")

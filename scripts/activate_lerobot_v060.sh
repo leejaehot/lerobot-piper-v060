@@ -2,6 +2,12 @@
 
 # Source this file; executing it cannot activate Conda in the parent shell.
 PIPER_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export PIPER_ROOT
+PIPER_LOCAL_ENV="${PIPER_LOCAL_ENV:-$PIPER_ROOT/configs/local.env}"
+if [[ -f "$PIPER_LOCAL_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$PIPER_LOCAL_ENV"
+fi
 PIPER_LEROBOT_ROOT="${PIPER_LEROBOT_ROOT:-$HOME/lerobot_v060}"
 PIPER_CONDA_ENV="${PIPER_CONDA_ENV:-lerobot_v060}"
 
@@ -12,7 +18,15 @@ if [[ -f "$CONDA_SH" ]]; then
     # makes this helper work from terminals, scripts, and container entrypoints.
     # shellcheck disable=SC1090
     source "$CONDA_SH"
-elif ! command -v conda >/dev/null 2>&1; then
+elif command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base 2>/dev/null)"
+    CONDA_SH="$CONDA_BASE/etc/profile.d/conda.sh"
+    if [[ -f "$CONDA_SH" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONDA_SH"
+    fi
+fi
+if ! command -v conda >/dev/null 2>&1; then
     echo "ERROR: conda not found; set PIPER_CONDA_SH to conda.sh" >&2
     return 1 2>/dev/null || exit 1
 fi

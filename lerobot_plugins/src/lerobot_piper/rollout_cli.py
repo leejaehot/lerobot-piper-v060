@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import importlib
 import json
 import os
 import subprocess
@@ -13,15 +15,25 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
-
+from lerobot_piper.cli_utils import (
+    available_profiles,
+    check_can_interfaces,
+    deep_merge as _deep_merge,
+    load_yaml as _load,
+    override as _override,
+    profile_directory,
+    resolve_profile_path,
+    section as _section,
+    wrapped_lines as _line,
+)
 from lerobot_piper.console_ui import paint, phase, supports_color
+from lerobot_piper.project_paths import PIPER_ROOT
 
-PIPER_ROOT = Path(os.getenv("PIPER_ROOT", Path(__file__).resolve().parents[3]))
 DEFAULT_CONFIG = PIPER_ROOT / "configs/rollout.yaml"
-CAN_INIT = PIPER_ROOT / "scripts/can_init"
+PROFILE_DIRECTORY = "rollouts"
+CAN_INIT = PIPER_ROOT / "scripts/can_init.sh"
 
-_REQUIRED_CHECKPOINT_FILES = (
+_REQUIRED_LEROBOT_CHECKPOINT_FILES = (
     "config.json",
     "model.safetensors",
     "policy_preprocessor.json",
@@ -42,23 +54,38 @@ DEFAULT_TELEOP_INITIAL_POSE = {
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="piper_rollout",
-        description="Run a local ACT or Diffusion Policy checkpoint on the Piper follower.",
+        description="Run a local policy checkpoint on the Piper follower.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "policy_name",
         nargs="?",
-        help="checkpoint alias from the config (act/dp) or a checkpoint directory",
+        help="rollout profile, checkpoint alias from the config, or checkpoint directory",
     )
     parser.add_argument(
         "--policy",
         dest="policy_option",
         help="same as the positional policy argument",
     )
+    parser.add_argument(
+        "--profile",
+        dest="profile_option",
+        help="profile name from configs/rollouts or a profile YAML path",
+    )
+    parser.add_argument(
+        "--list-profiles",
+        action="store_true",
+        help="list available rollout profiles and exit",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="YAML defaults")
     parser.add_argument("--task", help="task instruction passed to the policy")
     parser.add_argument("--seconds", type=float, help="bounded rollout duration")
     parser.add_argument("--fps", type=float, help="policy control frequency")
+    parser.add_argument(
+        "--n-action-steps",
+        type=int,
+        help="predicted actions to execute before observing again and replanning",
+    )
     parser.add_argument("--device", help="PyTorch device, for example cuda or cuda:0")
     parser.add_argument(
         "--amp",
@@ -87,6 +114,12 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--interpolation-multiplier",
         type=int,
         help="number of smooth control ticks per policy action",
+    )
+    parser.add_argument(
+        "--setup-preview",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="require camera/grid confirmation before any live rollout",
     )
     parser.add_argument(
         "--align-start",
@@ -131,27 +164,70 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _load(path: Path) -> dict[str, Any]:
-    try:
-        data = yaml.safe_load(path.read_text())
-    except FileNotFoundError as exc:
-        raise ValueError(f"Config file does not exist: {path}") from exc
-    except yaml.YAMLError as exc:
-        raise ValueError(f"Invalid YAML in {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"Config must contain a YAML mapping: {path}")
-    return data
+def _print_profiles(config_path: Path) -> None:
+    profiles = available_profiles(config_path, PROFILE_DIRECTORY)
+    if not profiles:
+        print(f"No rollout profiles found in {profile_directory(config_path, PROFILE_DIRECTORY)}")
+        return
+    print("Available Piper rollout profiles:")
+    for path in profiles:
+        data = _load(path)
+        metadata = _section(data, "profile")
+        description = str(metadata.get("description", "")).strip()
+        policy = _section(data, "policy")
+        selected = str(policy.get("default", ""))
+        checkpoints = policy.get("checkpoints", {})
+        checkpoint = checkpoints.get(selected, "") if isinstance(checkpoints, dict) else ""
+        detail = description or str(checkpoint)
+        print(f"  {path.stem:<16} {detail}")
 
 
-def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
-    value = data.get(name, {})
-    if not isinstance(value, dict):
-        raise ValueError(f"'{name}' must be a YAML mapping")
-    return value
+def _load_configuration(args: argparse.Namespace) -> dict[str, Any]:
+    base = _load(args.config)
+    if args.profile_option and args.policy_name:
+        raise ValueError("Specify a profile once: positional profile or --profile, not both")
 
+    selector = args.profile_option or args.policy_name
+    if selector is None:
+        return base
+    profile_path = resolve_profile_path(str(selector), args.config, PROFILE_DIRECTORY)
+    if profile_path is None:
+        if args.profile_option:
+            names = ", ".join(
+                path.stem for path in available_profiles(args.config, PROFILE_DIRECTORY)
+            ) or "none"
+            raise ValueError(f"Unknown rollout profile {selector!r}; available: {names}")
+        return base
 
-def _override(value: Any, fallback: Any) -> Any:
-    return fallback if value is None else value
+    profile_data = _load(profile_path)
+    metadata = dict(_section(profile_data, "profile"))
+    metadata.setdefault("name", profile_path.stem)
+    camera_aliases = metadata.get("camera_aliases", {})
+    if not isinstance(camera_aliases, dict):
+        raise ValueError("profile.camera_aliases must be a YAML mapping")
+    if camera_aliases and "cameras" in profile_data:
+        raise ValueError("A profile cannot define both cameras and profile.camera_aliases")
+
+    merged = _deep_merge(base, profile_data)
+    merged["profile"] = metadata
+    if "cameras" in profile_data:
+        merged["cameras"] = copy.deepcopy(profile_data["cameras"])
+    elif camera_aliases:
+        base_cameras = _section(base, "cameras")
+        missing = sorted({str(source) for source in camera_aliases.values()} - set(base_cameras))
+        if missing:
+            raise ValueError(
+                "Profile camera alias references missing base camera(s): "
+                + ", ".join(missing)
+            )
+        merged["cameras"] = {
+            str(policy_name): base_cameras[str(hardware_name)]
+            for policy_name, hardware_name in camera_aliases.items()
+        }
+
+    if args.profile_option is None:
+        args.policy_name = None
+    return merged
 
 
 def _path_from_lerobot_root(value: str | Path, lerobot_root: Path) -> Path:
@@ -169,6 +245,8 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
     capture = _section(data, "capture")
     audio = _section(data, "audio")
     initial_pose = _section(data, "teleop_initial_pose")
+    profile = _section(data, "profile")
+    runtime = _section(data, "runtime")
 
     if args.policy_name and args.policy_option:
         raise ValueError("Specify the policy once: positional act/dp or --policy, not both")
@@ -186,8 +264,10 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
     ).resolve()
     checkpoint_value = aliases.get(selected, selected)
     checkpoint = _path_from_lerobot_root(str(checkpoint_value), lerobot_root)
+    n_action_steps = _override(args.n_action_steps, policy.get("n_action_steps"))
 
     return {
+        "profile_name": str(profile.get("name", "")).strip() or None,
         "policy_label": str(selected),
         "checkpoint": checkpoint,
         "device": str(_override(args.device, policy.get("device", "cuda"))),
@@ -195,6 +275,15 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
         "use_torch_compile": bool(
             _override(args.compile, policy.get("use_torch_compile", False))
         ),
+        "n_action_steps": (
+            int(n_action_steps) if n_action_steps is not None else None
+        ),
+        "runtime_module": str(runtime.get("module", "")).strip() or None,
+        "runtime_options": {
+            str(key): copy.deepcopy(value)
+            for key, value in runtime.items()
+            if key != "module"
+        },
         "disable_pretrained_backbone_download": bool(
             policy.get("disable_pretrained_backbone_download", True)
         ),
@@ -206,6 +295,24 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
                 args.interpolation_multiplier,
                 rollout.get("interpolation_multiplier", 1),
             )
+        ),
+        "setup_preview": bool(
+            _override(args.setup_preview, rollout.get("setup_preview", False))
+        ),
+        "setup_preview_config": Path(
+            os.path.expandvars(
+                os.path.expanduser(
+                    str(
+                        rollout.get(
+                            "setup_preview_config",
+                            PIPER_ROOT / "configs" / "record.yaml",
+                        )
+                    )
+                )
+            )
+        ).resolve(),
+        "setup_preview_camera": str(
+            rollout.get("setup_preview_camera", "egoview")
         ),
         "rerun": bool(_override(args.rerun, rollout.get("rerun", False))),
         "rerun_compress_images": bool(rollout.get("rerun_compress_images", False)),
@@ -262,21 +369,56 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _runtime_adapter(cfg: dict[str, Any]):
+    module_name = cfg.get("runtime_module")
+    if module_name is None:
+        return None
+    try:
+        module = importlib.import_module(str(module_name))
+    except ImportError as exc:
+        raise ValueError(f"Cannot load local policy runtime {module_name!r}: {exc}") from exc
+    missing = [
+        name
+        for name in ("checkpoint_info", "check_inference", "rollout")
+        if not callable(getattr(module, name, None))
+    ]
+    if missing:
+        raise ValueError(
+            f"Local policy runtime {module_name!r} is missing callable(s): "
+            + ", ".join(missing)
+        )
+    return module
+
+
 def _checkpoint_info(cfg: dict[str, Any]) -> dict[str, Any]:
     checkpoint = Path(cfg["checkpoint"])
     if not checkpoint.is_dir():
         raise ValueError(f"Checkpoint directory does not exist: {checkpoint}")
-    missing = [name for name in _REQUIRED_CHECKPOINT_FILES if not (checkpoint / name).is_file()]
+
+    config_path = checkpoint / "config.json"
+    if not config_path.is_file():
+        raise ValueError("Checkpoint is missing required file(s): config.json")
+    model_config = _load_json(config_path)
+    adapter = _runtime_adapter(cfg)
+    if adapter is not None:
+        info = adapter.checkpoint_info(cfg, model_config)
+        if not isinstance(info, dict):
+            raise ValueError("Local policy runtime checkpoint_info() must return a mapping")
+        return info
+
+    policy_type = model_config.get("type")
+    if policy_type not in {"act", "diffusion"}:
+        raise ValueError(
+            "piper_rollout supports ACT and Diffusion checkpoints directly; "
+            f"configure runtime.module for {policy_type!r}"
+        )
+    missing = [
+        name for name in _REQUIRED_LEROBOT_CHECKPOINT_FILES if not (checkpoint / name).is_file()
+    ]
     if missing:
         raise ValueError(f"Checkpoint is missing required file(s): {', '.join(missing)}")
     if (checkpoint / "model.safetensors").stat().st_size == 0:
         raise ValueError("model.safetensors is empty")
-
-    model_config = _load_json(checkpoint / "config.json")
-    policy_type = model_config.get("type")
-    if policy_type not in {"act", "diffusion"}:
-        raise ValueError(f"piper_rollout supports ACT and Diffusion checkpoints, got: {policy_type!r}")
-
     inputs = model_config.get("input_features", {})
     outputs = model_config.get("output_features", {})
     if not isinstance(inputs, dict) or not isinstance(outputs, dict):
@@ -319,13 +461,81 @@ def _checkpoint_info(cfg: dict[str, Any]) -> dict[str, Any]:
             if state_file and not (checkpoint / str(state_file)).is_file():
                 raise ValueError(f"{filename} references missing state file: {state_file}")
 
+    checkpoint_n_action_steps = model_config.get("n_action_steps")
+    effective_n_action_steps = (
+        cfg["n_action_steps"]
+        if cfg["n_action_steps"] is not None
+        else checkpoint_n_action_steps
+    )
+    if not isinstance(effective_n_action_steps, int) or effective_n_action_steps < 1:
+        raise ValueError("policy.n_action_steps must be a positive integer")
+    chunk_size = model_config.get("chunk_size")
+    if isinstance(chunk_size, int) and effective_n_action_steps > chunk_size:
+        raise ValueError(
+            "policy.n_action_steps cannot exceed checkpoint chunk_size "
+            f"({effective_n_action_steps} > {chunk_size})"
+        )
+    if (
+        policy_type == "act"
+        and model_config.get("temporal_ensemble_coeff") is not None
+        and effective_n_action_steps != 1
+    ):
+        raise ValueError(
+            "ACT temporal ensembling requires policy.n_action_steps=1"
+        )
+
     return {
         "type": str(policy_type),
         "model_bytes": (checkpoint / "model.safetensors").stat().st_size,
-        "n_action_steps": model_config.get("n_action_steps"),
-        "chunk_size": model_config.get("chunk_size"),
+        "n_action_steps": effective_n_action_steps,
+        "checkpoint_n_action_steps": checkpoint_n_action_steps,
+        "chunk_size": chunk_size,
         "horizon": model_config.get("horizon"),
     }
+
+
+def _setup_preview_info(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    if not cfg["setup_preview"]:
+        return None
+    config_path = Path(cfg["setup_preview_config"])
+    preview_data = _load(config_path)
+    preview_cameras = _section(preview_data, "cameras")
+    camera_name = str(cfg["setup_preview_camera"])
+    if camera_name not in preview_cameras:
+        raise ValueError(
+            f"Setup preview camera {camera_name!r} is not present in {config_path}"
+        )
+    preview_serial = str(preview_cameras[camera_name])
+    rollout_serials = set(map(str, cfg["cameras"].values()))
+    if preview_serial not in rollout_serials:
+        raise ValueError(
+            "Setup preview camera is not used by this rollout: "
+            f"preview={camera_name} ({preview_serial}), "
+            f"rollout serials={sorted(rollout_serials)}"
+        )
+    return {
+        "config": config_path,
+        "camera": camera_name,
+        "serial": preview_serial,
+    }
+
+
+def _prepare_environment(cfg: dict[str, Any]) -> bool:
+    preview = _setup_preview_info(cfg)
+    if preview is None:
+        return False
+
+    from lerobot_piper import grid_preview_cli
+
+    return grid_preview_cli.main(
+        [
+            "--config",
+            str(preview["config"]),
+            "--camera",
+            str(preview["camera"]),
+            "--confirm",
+        ]
+    )
 
 
 def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -351,6 +561,9 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("camera serials must be unique")
     if not isinstance(cfg["wait_for_support"], bool):
         raise ValueError("wait_for_support must be true or false")
+    if not isinstance(cfg["setup_preview"], bool):
+        raise ValueError("rollout.setup_preview must be true or false")
+    _setup_preview_info(cfg)
     if cfg["align_start"]:
         if not 1 <= cfg["startup_pose_speed_percent"] <= 100:
             raise ValueError("teleop_initial_pose.speed_percent must be between 1 and 100")
@@ -418,19 +631,7 @@ def _detected_realsense_serials() -> set[str]:
 
 
 def _preflight_hardware(cfg: dict[str, Any]) -> str:
-    can_name = str(cfg["follower_can"])
-    if not Path(f"/sys/class/net/{can_name}").exists():
-        raise RuntimeError(f"Missing CAN interface: {can_name}; retry with --init-can")
-    status = subprocess.run(
-        ["ip", "-details", "link", "show", can_name],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if status.returncode != 0 or "can state ERROR-ACTIVE" not in status.stdout:
-        raise RuntimeError(
-            f"Unhealthy CAN interface: {can_name}; stop other Piper processes and retry with --init-can"
-        )
+    check_can_interfaces((str(cfg["follower_can"]),))
 
     configured_serials = set(map(str, cfg["cameras"].values()))
     detected_serials = _detected_realsense_serials()
@@ -443,35 +644,48 @@ def _preflight_hardware(cfg: dict[str, Any]) -> str:
     return _device_description(str(cfg["device"]))
 
 
-def _line(label: str, value: str, width: int = 72) -> list[str]:
-    prefix = f"{label:<11} "
-    parts = textwrap.wrap(value, width=width - len(prefix)) or [""]
-    return [
-        prefix + part if index == 0 else " " * len(prefix) + part
-        for index, part in enumerate(parts)
-    ]
-
-
 def _plan(cfg: dict[str, Any], checkpoint_info: dict[str, Any], *, mode: str) -> None:
     camera_text = "  ·  ".join(f"{name} ({serial})" for name, serial in cfg["cameras"].items())
     chunk = checkpoint_info.get("n_action_steps")
-    if checkpoint_info["type"] == "act":
-        policy_detail = f"ACT · execute {chunk} actions/chunk"
+    if checkpoint_info.get("plan_detail"):
+        policy_detail = str(checkpoint_info["plan_detail"])
+    elif checkpoint_info["type"] == "act":
+        policy_detail = (
+            f"ACT · predict {checkpoint_info.get('chunk_size')} · "
+            f"execute {chunk} then replan"
+        )
     else:
         policy_detail = (
             f"Diffusion · horizon {checkpoint_info.get('horizon')} · execute {chunk} actions/chunk"
         )
     rows: list[str] = []
     rows += _line("MODE", mode)
+    if cfg["profile_name"]:
+        rows += _line("PROFILE", str(cfg["profile_name"]))
     rows += _line("POLICY", f"{cfg['policy_label']} · {policy_detail}")
     rows += _line("CHECKPOINT", str(cfg["checkpoint"]))
     rows += _line("MODEL", f"{checkpoint_info['model_bytes'] / (1024**2):.1f} MiB")
     rows += _line("TASK", str(cfg["task"]))
     rows += _line("CAMERAS", camera_text)
     rows += _line(
+        "SETUP GRID",
+        (
+            f"ON · {cfg['setup_preview_camera']} · Enter confirms, q/Esc cancels"
+            if cfg["setup_preview"]
+            else "OFF"
+        ),
+    )
+    control_rate = f"{cfg['fps']:g} Hz"
+    if cfg["interpolation_multiplier"] > 1:
+        control_rate = (
+            f"policy {cfg['fps']:g} Hz · send "
+            f"{cfg['fps'] * cfg['interpolation_multiplier']:g} Hz "
+            f"({cfg['interpolation_multiplier']}× linear)"
+        )
+    rows += _line(
         "CONTROL",
         (
-            f"{cfg['fps']:g} Hz · {cfg['duration']:g}s · speed {cfg['speed_percent']}% · "
+            f"{control_rate} · {cfg['duration']:g}s · speed {cfg['speed_percent']}% · "
             f"max Δ {cfg['max_relative_target']:g} · gripper {cfg['gripper_speed_mm_s']:g} mm/s"
         ),
     )
@@ -487,6 +701,16 @@ def _plan(cfg: dict[str, Any], checkpoint_info: dict[str, Any], *, mode: str) ->
             )
         ),
     )
+    if cfg["align_start"]:
+        pose = cfg["startup_pose"]
+        rows += _line(
+            "START POSE",
+            "["
+            + ", ".join(
+                f"{float(pose[name]):.2f}" for name in DEFAULT_TELEOP_INITIAL_POSE
+            )
+            + "]",
+        )
     rows += _line(
         "COMPUTE",
         (
@@ -535,6 +759,8 @@ def _policy_config(cfg: dict[str, Any]):
     policy_config.pretrained_path = str(cfg["checkpoint"])
     policy_config.device = str(cfg["device"])
     policy_config.use_amp = bool(cfg["use_amp"])
+    if cfg["n_action_steps"] is not None:
+        policy_config.n_action_steps = int(cfg["n_action_steps"])
     if cfg["disable_pretrained_backbone_download"] and hasattr(
         policy_config, "pretrained_backbone_weights"
     ):
@@ -604,6 +830,10 @@ def _rollout_config(cfg: dict[str, Any]):
 
 
 def _check_inference(cfg: dict[str, Any]) -> tuple[list[float], float, str]:
+    adapter = _runtime_adapter(cfg)
+    if adapter is not None:
+        return adapter.check_inference(cfg)
+
     import torch
 
     from lerobot.configs import FeatureType
@@ -629,7 +859,13 @@ def _check_inference(cfg: dict[str, Any]) -> tuple[list[float], float, str]:
             channels, height, width = feature.shape
             observation[key] = np.zeros((height, width, channels), dtype=np.uint8)
         elif feature.type is FeatureType.STATE:
-            observation[key] = np.zeros(feature.shape, dtype=np.float32)
+            if key == "observation.state" and cfg["align_start"]:
+                observation[key] = np.asarray(
+                    [cfg["startup_pose"][name] for name in DEFAULT_TELEOP_INITIAL_POSE],
+                    dtype=np.float32,
+                )
+            else:
+                observation[key] = np.zeros(feature.shape, dtype=np.float32)
 
     prepared = prepare_observation_for_inference(
         observation,
@@ -676,8 +912,19 @@ def _failure_hint(message: str) -> str | None:
 def main(argv: list[str] | None = None) -> None:
     args = _arguments(argv)
     try:
-        cfg = _effective(_load(args.config), args)
+        if args.list_profiles:
+            _print_profiles(args.config)
+            return
+        cfg = _effective(_load_configuration(args), args)
         checkpoint_info = _validate(cfg)
+        adapter = _runtime_adapter(cfg)
+        preparation_confirmed = False
+
+        if not args.dry_run and not args.check and cfg["setup_preview"]:
+            preparation_confirmed = _prepare_environment(cfg)
+            if not preparation_confirmed:
+                phase("CANCELLED", "Pre-rollout environment check was cancelled", "yellow")
+                return
 
         if args.init_can:
             phase("CAN", "Initializing USB-CAN adapters")
@@ -704,9 +951,9 @@ def main(argv: list[str] | None = None) -> None:
         phase("CHECK", "Checking CUDA, follower CAN, and exact RealSense serials")
         device_description = _preflight_hardware(cfg)
         phase("READY", f"Preflight passed on {device_description}", "green")
-        if not args.yes and not sys.stdin.isatty():
+        if not args.yes and not preparation_confirmed and not sys.stdin.isatty():
             raise RuntimeError("Non-interactive hardware rollout requires explicit --yes")
-        if not args.yes:
+        if not args.yes and not preparation_confirmed:
             prompt = (
                 "Clear the workspace and press Enter to align the follower and start, "
                 "or type q to cancel: "
@@ -718,8 +965,6 @@ def main(argv: list[str] | None = None) -> None:
                 phase("CANCELLED", "No hardware was activated", "yellow")
                 return
 
-        from lerobot.scripts import lerobot_rollout
-
         connect_message = "Loading policy, connecting cameras, and enabling follower torque"
         if cfg["align_start"]:
             connect_message = (
@@ -727,7 +972,12 @@ def main(argv: list[str] | None = None) -> None:
                 "and connecting cameras"
             )
         phase("CONNECT", connect_message)
-        lerobot_rollout.rollout(_rollout_config(cfg))
+        if adapter is None:
+            from lerobot.scripts import lerobot_rollout
+
+            lerobot_rollout.rollout(_rollout_config(cfg))
+        else:
+            adapter.rollout(cfg)
         phase("COMPLETE", "Policy rollout finished", "green")
     except KeyboardInterrupt:
         phase("STOPPED", "Interrupted by user; safe teardown was requested", "yellow", stream=sys.stderr)

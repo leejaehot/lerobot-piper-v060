@@ -6,9 +6,20 @@ configs/can_mapping.env
 configs/record.yaml
 configs/teleop.yaml
 configs/rollout.yaml
+configs/replay.yaml
+configs/local.env
 *.code-workspace
 logs/
 vendor/
+# Local/private VITA integration. Keep these usable for rollout without
+# accidentally including the unpublished policy code or profiles in a commit.
+lerobot_plugins/src/lerobot_piper/vita_runtime.py
+configs/rollouts/*vita*.yaml
+lerobot_plugins/tests/test_vita_runtime_local.py
+requirements-vita.local.txt
+docs/vita.local.md
 .venv/
 dist/
 build/
+lerobot-rerun-grid/
+lerobot-rerun-grid.tar.gz

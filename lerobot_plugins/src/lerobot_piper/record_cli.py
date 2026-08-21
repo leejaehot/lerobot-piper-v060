@@ -4,19 +4,23 @@ import argparse
 import os
 import subprocess
 import sys
-import textwrap
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from lerobot_piper.cli_utils import (
+    check_can_interfaces,
+    load_yaml as _load,
+    override,
+    section as _section,
+    wrapped_lines,
+)
 from lerobot_piper.console_ui import paint, phase, recording_log_style, supports_color
+from lerobot_piper.project_paths import PIPER_ROOT
 
-PIPER_ROOT = Path(os.getenv("PIPER_ROOT", Path(__file__).resolve().parents[3]))
 DEFAULT_CONFIG = PIPER_ROOT / "configs/record.yaml"
-CAN_INIT = PIPER_ROOT / "scripts/can_init"
+CAN_INIT = PIPER_ROOT / "scripts/can_init.sh"
 DEFAULT_LEROBOT_HOME = Path.home() / ".cache/huggingface/lerobot-v060-piper"
 
 
@@ -113,25 +117,6 @@ def _arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load(path: Path) -> dict[str, Any]:
-    try:
-        data = yaml.safe_load(path.read_text())
-    except FileNotFoundError as exc:
-        raise ValueError(f"Config file does not exist: {path}") from exc
-    except yaml.YAMLError as exc:
-        raise ValueError(f"Invalid YAML in {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"Config must contain a YAML mapping: {path}")
-    return data
-
-
-def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
-    value = data.get(name, {})
-    if not isinstance(value, dict):
-        raise ValueError(f"'{name}' must be a YAML mapping")
-    return value
-
-
 def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     dataset = _section(data, "dataset")
     capture = _section(data, "capture")
@@ -142,9 +127,6 @@ def _effective(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
     reset_grid = _section(data, "reset_grid")
     initial_setup = _section(data, "initial_setup")
     audio = _section(data, "audio")
-
-    def override(value: Any, fallback: Any) -> Any:
-        return fallback if value is None else value
 
     cfg = {
         "repo_id": args.repo_id or dataset.get("repo_id", "local/piper_doubleport"),
@@ -297,28 +279,7 @@ def _usb_realsense_count() -> int:
 
 
 def _preflight(cfg: dict[str, Any]) -> None:
-    missing_can = [
-        name
-        for name in (cfg["leader_can"], cfg["follower_can"])
-        if not Path(f"/sys/class/net/{name}").exists()
-    ]
-    if missing_can:
-        raise RuntimeError(f"Missing CAN interface(s): {', '.join(missing_can)}; run with --init-can")
-    unhealthy_can = []
-    for name in (cfg["leader_can"], cfg["follower_can"]):
-        status = subprocess.run(
-            ["ip", "-details", "link", "show", str(name)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if status.returncode != 0 or "can state ERROR-ACTIVE" not in status.stdout:
-            unhealthy_can.append(str(name))
-    if unhealthy_can:
-        raise RuntimeError(
-            f"Unhealthy CAN interface(s): {', '.join(unhealthy_can)}; stop other Piper processes "
-            "and retry with --init-can"
-        )
+    check_can_interfaces((cfg["leader_can"], cfg["follower_can"]))
     detected = _usb_realsense_count()
     expected = len(cfg["cameras"])
     if detected < expected:
@@ -326,12 +287,7 @@ def _preflight(cfg: dict[str, Any]) -> None:
 
 
 def _line(label: str, value: str, width: int = 68) -> list[str]:
-    prefix = f"{label:<10} "
-    parts = textwrap.wrap(value, width=width - len(prefix)) or [""]
-    return [
-        prefix + part if index == 0 else " " * len(prefix) + part
-        for index, part in enumerate(parts)
-    ]
+    return wrapped_lines(label, value, width=width, label_width=10)
 
 
 def _plan(cfg: dict[str, Any], *, test: bool, reset_grid_guide=None) -> None:

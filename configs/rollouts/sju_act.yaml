@@ -1,0 +1,10 @@
+profile:
+  description: Sejong green-cider-to-white-container · ACT chunk 50
+
+policy:
+  default: sju_act
+  checkpoints:
+    sju_act: outputs/policies/sju/act_latest
+
+rollout:
+  task: Pick a green cider can and place it in a white container on the table.

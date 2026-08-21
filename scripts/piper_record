@@ -1,5 +1,0 @@
-#!/usr/bin/env python3
-
-from lerobot_piper.record_cli import main
-
-main()

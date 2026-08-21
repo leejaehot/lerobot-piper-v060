@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from lerobot_piper.audio import _play_countdown, _record_cue, local_record_audio
 from lerobot_piper.console_ui import announce, recording_log_style
 from lerobot_piper.grid_preview_cli import _settings as grid_preview_settings
 from lerobot_piper.record_cli import _effective, _validate
+from lerobot_piper.project_paths import find_piper_root
 from lerobot_piper.reset_grid import (
     GRID_COL,
     GRID_ROW,
@@ -1024,12 +1026,52 @@ def test_record_home_reset_config_requires_a_motion_free_countdown_window() -> N
         _validate(cfg)
 
 
-def test_installed_teleop_entry_point_targets_shared_launcher() -> None:
+def test_installed_teleop_entry_point_targets_internal_backend() -> None:
     script = teleop_script_path()
-    expected = Path(__file__).resolve().parents[2] / "scripts" / "piper_teleop.sh"
+    expected = Path(__file__).resolve().parents[2] / "scripts" / "teleop_backend.sh"
 
     assert script == expected
     assert script.is_file()
+    assert os.access(script, os.X_OK)
+
+
+def test_project_root_discovery_does_not_depend_on_package_depth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PIPER_ROOT", raising=False)
+    for marker in ("configs", "scripts", "lerobot_plugins"):
+        (tmp_path / marker).mkdir()
+    nested_module = tmp_path / "arbitrary" / "wheel" / "layout" / "module.py"
+    nested_module.parent.mkdir(parents=True)
+    nested_module.touch()
+
+    assert find_piper_root(nested_module) == tmp_path
+
+
+def test_follower_releases_torque_when_camera_disconnect_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("lerobot_piper.piper.time.sleep", lambda _: None)
+
+    class FailingCamera:
+        is_connected = True
+
+        def disconnect(self) -> None:
+            raise RuntimeError("camera cleanup failed")
+
+    driver = FakePyAgxArm()
+    follower = PiperFollower(
+        PiperFollowerConfig(port="can_follower", cameras={}),
+        driver_factory=lambda _: driver,
+    )
+    follower.bus.connect()
+    follower.cameras = {"egoview": FailingCamera()}
+
+    with pytest.raises(ExceptionGroup, match="cleanup error"):
+        follower.disconnect()
+
+    assert driver.calls[-2:] == ["disable", "disconnect"]
 
 
 def test_teleop_yaml_loads_standalone_arm_grid_audio_and_rates(tmp_path: Path) -> None:

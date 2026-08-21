@@ -2,76 +2,43 @@
 
 **English** | [한국어](README.ko.md)
 
-AgileX Piper leader/follower teleoperation and synchronized dual-RealSense
-dataset recording for [LeRobot 0.6.0](https://github.com/huggingface/lerobot/tree/v0.6.0).
+AgileX Piper leader/follower teleoperation, visualization, dataset recording,
+and policy rollout for [LeRobot v0.6.0](https://github.com/huggingface/lerobot/tree/v0.6.0).
 
-The integration uses the official
-[pyAgxArm](https://github.com/agilexrobotics/pyAgxArm) API as a pinned dependency.
-It does not vendor or modify the SDK.
+> [!CAUTION]
+> Connecting enables follower torque and may move the arm. Support both arms,
+> clear the workspace, and keep the emergency stop ready before starting.
 
-## Highlights
+## Commands
 
-- Stable leader/follower SocketCAN names bound to USB adapter serials
-- Piper leader activation compatible with the proven LeRobot 0.4.3 startup flow
-- 200 Hz leader-to-follower control independent of 30 Hz dataset capture
-- D435 + D405 recording with non-blocking latest-frame sampling
-- 30 Hz absolute-deadline dataset scheduler and capture-rate summary
-- 10 Hz compressed Rerun preview without reducing recorded image quality
-- Color-coded terminal phases and a compact teleoperation dashboard
-- YAML recording configuration with small CLI overrides
-
-## Safety
-
-The follower torque is enabled during connection and the arm can move abruptly.
-Support the leader, align both arm poses, clear both workspaces, and prepare the
-emergency stop before starting teleoperation or recording.
-
-The default 200 Hz control, 100% speed, and relative target cap of 100 are
-aggressive. Reduce them for initial validation.
-
-## Layout
-
-```text
-configs/                 Local CAN and recording configuration templates
-lerobot_plugins/         Piper robot, teleoperator, CAN bus, and record CLI
-patches/                 Minimal compatibility patch for LeRobot v0.6.0
-scripts/                 Installation, CAN setup, teleop, and environment helpers
-```
-
-Local hardware identities and datasets are ignored by Git. The repository does
-not include CAN dumps, USB serial mappings, camera serials, or recorded data.
+| Command | Purpose | Hardware |
+| --- | --- | --- |
+| `piper_teleop` | Leader → follower teleoperation | Leader + follower |
+| `piper_vis` | RealSense and reset-grid preview | Camera only |
+| `piper_record` | LeRobot dataset recording | Leader + follower + cameras |
+| `piper_rollout` | ACT / Diffusion Policy rollout | Follower + cameras |
+| `piper_replay` | Dataset inspection and optional hardware replay | None by default |
 
 ## Requirements
 
-- Ubuntu with SocketCAN and the `gs_usb` driver
-- Python 3.12 environment containing LeRobot 0.6.0
-- Two Piper arms and two USB-CAN adapters
-- Intel RealSense cameras supported by `pyrealsense2`
-- `iproute2`, `udev`, Git, and FFmpeg
+- Ubuntu 24.04 (`x86_64` or `aarch64`)
+- Python 3.12
+- LeRobot `v0.6.0`
+- [pyAgxArm](https://github.com/agilexrobotics/pyAgxArm) `799b841`
+- Two Piper arms and two `gs_usb` USB-CAN adapters
+- Intel RealSense D435 + D405
+- NVIDIA CUDA is recommended for rollout.
 
-## Environment strategy
+> [!NOTE]
+> The hardware-validated environment is **NVIDIA Jetson AGX Thor** (`aarch64`),
+> Ubuntu 24.04.4, Jetson Linux R38.2.2, Python 3.12.13, and PyTorch
+> 2.11.0+cu130. Standard `x86_64` Ubuntu uses the same LeRobot commit and Python
+> constraints; only the PyTorch, TorchVision, and RealSense wheels are selected
+> for that machine's architecture and CUDA stack.
 
-Native Conda installation is recommended for a hardware workstation. It keeps
-SocketCAN, USB permissions, udev, RealSense, and NVIDIA drivers visible without
-an additional container boundary while isolating Python packages.
+## Quick start
 
-Docker is useful when the complete user-space stack must be reproduced on
-multiple machines, but it does **not** package the host kernel, `gs_usb`, udev
-rules, USB permissions, or the NVIDIA driver. A Piper container would still
-need a compatible Ubuntu/JetPack host, host-side CAN initialization,
-`--network=host` for SocketCAN, USB device passthrough for RealSense, and the
-NVIDIA Container Toolkit when a GPU is used. For one robot workstation, start
-with Conda; add a platform-specific Docker image when the environment must be
-deployed repeatedly.
-
-This repository pins LeRobot to `v0.6.0` and pyAgxArm to a specific Git commit.
-Compatible transitive pip packages are not yet locked byte-for-byte, so the
-current native setup is version-bounded rather than a complete environment
-snapshot.
-
-## Install (native Conda, recommended)
-
-### 1. Prepare the Ubuntu host
+### 1. Host packages
 
 ```bash
 sudo apt update
@@ -80,428 +47,250 @@ sudo modprobe gs_usb
 git lfs install
 ```
 
-The CAN interfaces and RealSense cameras must be visible on the host before
-debugging Python. The `gs_usb` module and device permissions are host settings;
-they are not installed into a Conda environment.
-
-### 2. Create the Python environment
-
-Install [Miniforge](https://github.com/conda-forge/miniforge) if `conda` is not
-available, then create the environment:
+CAN adapters and RealSense cameras must be visible on the host before installing
+Python packages.
 
 ```bash
-conda create -y -n lerobot_v060 python=3.12
+ip -br link
+lsusb
+```
+
+### 2. Conda environment
+
+Install [Miniforge](https://github.com/conda-forge/miniforge), then run:
+
+```bash
+git clone \
+  https://github.com/leejaehot/lerobot-piper-v060.git ~/piper
+conda env create -f ~/piper/environment.yml
 conda activate lerobot_v060
-conda install -y -c conda-forge ffmpeg=7.1.1
-python -m pip install --upgrade pip
 ```
 
-### 3. Install LeRobot v0.6.0 from source
+`constraints.txt` pins the Python packages shared by both architectures.
+PyTorch, TorchVision, TorchCodec, and `pyrealsense2` are excluded because their
+binary wheels must match the host platform.
 
-Clone LeRobot at the supported version and this repository alongside it:
+### 3. Clone and install
+
+Keep the LeRobot checkout beside the Piper integration.
 
 ```bash
-git clone --branch v0.6.0 https://github.com/huggingface/lerobot.git ~/lerobot_v060
+git clone --branch v0.6.0 --depth 1 \
+  https://github.com/huggingface/lerobot.git ~/lerobot_v060
+
 cd ~/lerobot_v060
-python -m pip install -e ".[core_scripts,intelrealsense]"
-```
-
-The `core_scripts` extra installs dataset recording, hardware, and Rerun
-dependencies. The `intelrealsense` extra installs `pyrealsense2`. If no
-`pyrealsense2` wheel exists for the target Python/aarch64 platform, build or
-obtain a matching wheel first and install it into this same environment.
-
-### 4. Apply the Piper integration
-
-```bash
-git clone https://github.com/leejaehot/lerobot-piper-v060.git ~/piper
+python -m pip install -c ~/piper/constraints.txt \
+  -e ".[core_scripts,intelrealsense,diffusion]"
 
 ~/piper/scripts/install.sh ~/lerobot_v060
 source ~/piper/scripts/activate_lerobot_v060.sh
 ```
 
-`install.sh` applies [the small LeRobot patch](patches/lerobot-v0.6.0-piper.patch)
-to the local editable LeRobot checkout, installs this repository's
-`lerobot_robot_piper` distribution in editable mode, and creates a local
-teleop, recording, and rollout configuration from the examples when needed.
-Re-running it is safe when the patch is already present.
+`install.sh` applies the LeRobot v0.6.0 compatibility patch, installs the Piper
+plugin in editable mode, and creates local `teleop.yaml`, `record.yaml`,
+`rollout.yaml`, and `replay.yaml` files once. It records the selected LeRobot
+checkout in the Git-ignored `configs/local.env`.
 
-LeRobot discovers installed distributions whose names begin with
-`lerobot_robot_` and imports them automatically. Importing
-`lerobot_robot_piper` registers both `piper_follower` and `piper_leader`, so the
-plugin source does not need to be copied into `src/lerobot`. Because both
-projects are editable installs, local source changes take effect immediately.
+On standard Ubuntu, the command above resolves wheels for the host architecture.
+On Jetson, first install the NVIDIA PyTorch/TorchVision and `pyrealsense2` wheels
+that match the installed JetPack/CUDA release.
 
-Source the activation helper in every new terminal:
+Start every new terminal with:
 
 ```bash
 source ~/piper/scripts/activate_lerobot_v060.sh
 ```
 
-It activates `lerobot_v060`, adds the Piper scripts to `PATH`, loads the local
-CAN mapping, selects a separate LeRobot data directory, and changes to the
-LeRobot checkout. Verify the installation without moving either arm:
+### 4. Verify software
+
+These commands do not connect CAN or motors.
 
 ```bash
 python -c 'import lerobot_robot_piper, lerobot_teleoperator_piper; print("Piper plugins: OK")'
-python -m pip show lerobot lerobot_robot_piper pyAgxArm pyrealsense2
 piper_teleop --help
+piper_vis --help
 piper_record --help
+piper_rollout --help
+piper_replay --help
 ```
 
-Expected locations are the editable LeRobot checkout (`~/lerobot_v060`) and
-this repository (`~/piper/lerobot_plugins`), not an unrelated global Python
-installation.
+Also verify CUDA on machines used for rollout.
 
-## Configure CAN roles
+```bash
+python -c 'import platform, torch; print(platform.machine(), torch.__version__, torch.cuda.is_available())'
+```
 
-Connect both adapters, identify which current interface belongs to each arm,
-then save the mapping:
+## One-time hardware setup
+
+### 1. CAN roles
+
+Connect both USB-CAN adapters. Disconnect them one at a time to identify the
+current leader and follower interface names, then save their roles.
 
 ```bash
 can_init --status
 can_init --configure --leader can4 --follower can5
 can_init
+can_init --status
 ```
 
-The generated `configs/can_mapping.env` is intentionally ignored by Git.
-Initialization configures 1 Mbit/s CAN and renames the adapters to
-`can_leader` and `can_follower`; it does not send robot motion commands.
+The adapters are subsequently restored as `can_leader` and `can_follower` by
+USB serial. Machine-local mapping is stored in the Git-ignored
+`configs/can_mapping.env`.
 
-## Teleoperate
-
-```bash
-piper_teleop --init-can
-```
-
-Teleop reads its standalone defaults from `configs/teleop.yaml`. It contains
-the CAN roles, control and monitor rates, follower/gripper limits, audio,
-egoview camera, reset grid, and fixed object poses. Use another file with:
+### 2. Cameras and local configs
 
 ```bash
-piper_teleop --config ~/piper/configs/teleop.yaml
-```
-
-CLI options override environment variables, which override the YAML. Safer
-one-off settings can still be supplied through environment variables:
-
-```bash
-PIPER_TELEOP_SPEED_PERCENT=20 \
-PIPER_TELEOP_MAX_RELATIVE_TARGET=5 \
-piper_teleop
-```
-
-The full-screen terminal dashboard displays leader target, follower qpos,
-joint tracking error, gripper position, flange pose, and control-loop rate.
-
-Teleop also opens a camera-only Rerun view by default. It reads the egoview
-camera, 16×12 reset grid, and fixed per-object initial poses from
-`configs/teleop.yaml`, keeps the 200 Hz arm control loop independent, and
-refreshes raw Rerun frames at 10 Hz. This is visualization only; teleop does
-not write reset annotations. Useful overrides are:
-
-```bash
-PIPER_TELEOP_RERUN_FPS=15 piper_teleop
-piper_teleop --no-rerun
-```
-
-Set `PIPER_TELEOP_CONFIG` to change the default config path. Teleop plays short
-local Korean WAV cues for ready, safe-disconnect, and disconnected states by
-default. Set `audio.enabled: false` or use
-`PIPER_TELEOP_SOUNDS=false piper_teleop` to disable them.
-
-The leader gripper defaults to teaching friction `5`, a balance between hand
-effort and passive position holding on this hardware. A follower-only
-`80 mm/s` slew limit smooths sudden gripper input without reducing the 200 Hz
-arm-joint control rate. Override either value when needed:
-
-```bash
-PIPER_LEADER_GRIPPER_FRICTION=4 \
-PIPER_TELEOP_GRIPPER_SPEED_MM_S=60 \
-piper_teleop
-```
-
-Friction accepts `1..10`. Higher values require less hand force but are more
-likely to drift open; `4..6` is recommended for this setup.
-
-After `Ctrl-C`, torque remains on while a safe-disconnect prompt is shown.
-Support both arms—especially the follower—then press Enter to release torque
-and disconnect CAN. Non-interactive runs such as pipes or cron cannot wait for
-confirmation, so they log a warning and retain the previous shutdown behavior.
-
-## Roll out a trained policy
-
-`piper_rollout` wraps LeRobot's real-robot `lerobot-rollout` engine with Piper
-checkpoint validation and conservative hardware defaults. The installer copies
-`configs/rollout.example.yaml` to the local-only `configs/rollout.yaml`; update
-that file with this setup's two RealSense serials and the ACT and Diffusion
-Policy checkpoint paths under `~/lerobot_v060/outputs/policies`.
-Validate without connecting to the robot first:
-
-```bash
-piper_rollout act --dry-run
-piper_rollout act --check
-piper_rollout dp --check
-```
-
-`--check` loads the model, safetensors, and saved normalizer/unnormalizer on CUDA
-and runs one inference on black synthetic images. It does not open CAN, cameras,
-or motors. After that passes, clear the workspace, hold the E-stop, and start a
-bounded 30-second rollout:
-
-```bash
-piper_rollout act --init-can
-piper_rollout dp --init-can
-```
-
-Defaults match the 30 Hz training data while limiting the follower to 30% speed,
-`5` normalized joint units per tick, and `40 mm/s` gripper travel. Rerun is off
-for the first timing and safety run; enable it with `--rerun`. Before policy
-control, the follower aligns at 20% speed to the `piper_teleop` demonstration
-start pose (official-home joints with the gripper closed) and must remain within
-tolerance for three consecutive samples. Use `--no-align-start` to skip this,
-or `--align-speed` and `--align-timeout` to override its motion settings. The
-pose and tolerances are configurable under `teleop_initial_pose` in
-`configs/rollout.yaml`. On `Ctrl-C` or the duration limit, the follower returns
-smoothly to this aligned startup pose and then waits for support confirmation
-before releasing torque. Edit
-`configs/rollout.yaml` or use CLI overrides to change checkpoint paths, task,
-cameras, or limits. Non-interactive execution is rejected unless `--yes` is
-provided explicitly.
-
-## Configure recording
-
-Create the local configuration and replace the two RealSense serials:
-
-```bash
-cp ~/piper/configs/record.example.yaml ~/piper/configs/record.yaml
 lerobot-find-cameras realsense
 ```
 
-The most frequently edited settings are:
+Copy the reported serials into:
 
-```yaml
-dataset:
-  repo_id: local/piper_doubleport
-  task: Put the object in the target container.
-  episodes: 10
-  episode_seconds: 60
+| File | Values to edit |
+| --- | --- |
+| `~/piper/configs/teleop.yaml` | `cameras.egoview` |
+| `~/piper/configs/record.yaml` | `cameras.egoview`, `cameras.wristcam`, dataset fields |
+| `~/piper/configs/rollout.yaml` | Both camera serials and shared checkpoint settings |
 
-cameras:
-  egoview: "D435_SERIAL"
-  wristcam: "D405_SERIAL"
-```
-
-Run a five-second validation before collecting a real dataset:
-
-```bash
-piper_record --init-can --test
-piper_record
-```
-
-Recording uses the same safe-disconnect Enter confirmation and gripper
-defaults. Adjust them in the local `configs/record.yaml` when necessary:
-
-```yaml
-initial_setup:
-  wait_for_enter: true
-
-arm:
-  gripper_speed_mm_s: 80
-  leader_gripper_friction: 5
-  home_on_reset: true
-  home_speed_percent: 20
-  home_tolerance_degrees: 2
-
-audio:
-  enabled: true
-```
-
-After every completed or discarded take, only the follower returns to Piper's
-physical zero/home before the next episode. It uses the driver's normal
-`move_j()` path at `home_speed_percent`. The home-reset path performs no leader
-firmware compatibility query, sends no leader home command, and never requires
-the leader to be at zero.
-
-`dataset.reset_seconds` includes the home move, scene reset, and final spoken
-countdown. The final three seconds are reserved as a motion-free window. The
-follower must remain within `home_tolerance_degrees` for three consecutive checks;
-otherwise recording stops before the next episode instead of resuming from an
-unsafe follower pose. The initial reset before episode 1 does not move either
-arm. Use `--no-home-on-reset` to disable the follower return.
-
-Before the first episode, the reset view stays live until Enter is pressed.
-Use the 10 Hz Rerun grid to place every object, focus the recording terminal,
-and press Enter. Leader-to-follower control remains at 200 Hz while waiting;
-Enter starts a dedicated `Three`, `Two`, `One` countdown and recording begins
-after it finishes. Right/Left pedals do not confirm this initial setup. Disable
-the gate with `initial_setup.wait_for_enter: false` or
-`piper_record --no-wait-for-enter` for non-interactive collection.
-
-Recording audio cues use clear English neural speech for the dynamic episode
-number (`Recording episode one` through `Recording episode fifty`) and short Korean
-status phrases such as `키프레임 1` through `키프레임 10`, `환경 초기화`,
-`재녹화`, and `취득 종료`.
-The final three seconds of environment reset play `Three`, `Two`, `One` at
-one-second intervals before the next `Recording episode ...` cue. An early
-reset exit cancels the remaining countdown.
-`키프레임` plays only after an
-accepted Space-pedal boundary is attached to a recorded frame; debounced or
-out-of-recording presses remain silent. The cues are cached PCM WAV files and launch
-non-blocking through the system default audio output; runtime recording never
-uses Speech Dispatcher or an online TTS service. Override the YAML with
-`piper_record --sounds` or `piper_record --no-sounds`. Regenerate the assets
-for more numbered episodes with:
-
-```bash
-uv run scripts/generate_voice_assets.py --max-episodes 50 --max-keyframes 10
-```
-
-### Egocentric reset-position grid
-
-`piper_record` projects a 16 × 12 tabletop grid and the fixed initial pose of
-each configured object over the egoview in Rerun at 10 Hz. The overlay is a
-separate Rerun entity: it is never burned into the recorded camera frames.
-The same configured poses are shown for every take; the recorder does not
-generate, recommend, or shuffle nearby positions.
-
-Configure the tabletop quadrilateral with normalized image coordinates in
-top-left, top-right, bottom-right, bottom-left order:
-
-```yaml
-reset_grid:
-  enabled: true
-  camera: egoview
-  columns: 16
-  rows: 12
-  corners:
-    - [0.12, 0.24]
-    - [0.88, 0.24]
-    - [0.95, 0.90]
-    - [0.05, 0.90]
-  initial_poses:
-    spam_can: [4, 6]
-    white_container: [[2, 2], [7, 2], [2, 9], [7, 9]]
-```
-
-The four full-frame corners in the local default are only a quick visual test.
-Replace them with the actual tabletop/workspace corners before collecting the
-final dataset. Perspective is handled by a homography, so equal grid steps
-represent equal steps on that planar workspace rather than equal image pixels.
-Initial poses use zero-based `[column, row]` coordinates, so a 16 × 12 grid
-accepts columns `0..15` and rows `0..11`.
-A single coordinate renders as a point. Four axis-aligned corner coordinates
-render as a labeled box; input order does not matter. YAML uses a nested list,
-not `{...}` mapping syntax.
-
-Every frame receives the same fixed-pose vectors. A point uses its object key
-as the annotation name. A box preserves all four normalized corners as
-`object.corner_1` through `object.corner_4`, ordered TL, TR, BR, BL:
-
-```text
-annotation.reset.initial_pose.position_id
-annotation.reset.initial_pose.grid_col
-annotation.reset.initial_pose.grid_row
-annotation.reset.initial_pose.x_norm
-annotation.reset.initial_pose.y_norm
-```
-
-Use `--no-grid` to disable both reset guidance and these annotation columns.
-
-To inspect or tune the grid without enabling CAN or either arm, run:
+Preview the camera and grid first. This does not connect either arm.
 
 ```bash
 piper_vis
 ```
 
-This connects only the configured egoview camera and builds a camera-only Rerun
-layout. It shows the same fixed object poses at the configured 10 Hz rate; use
-`q` or `Esc` to quit. The preview always sends raw images for reliable native
-Viewer rendering on Jetson. It never connects CAN, the leader, or the follower.
-Pass another config with `piper_vis --config configs/teleop.yaml`. The existing
-`piper_grid_preview` command remains available as a compatibility alias.
+## Run
 
-### Three-pedal recording controls
+### Teleoperation
 
-A USB HID foot pedal can be used without a custom driver when it emits the
-following keyboard keys:
+Use conservative limits for the first motion test.
 
-| Pedal | HID key | Recording action |
-| --- | --- | --- |
-| Left | Left Arrow | Discard the current take and re-record the same episode |
-| Middle | Space | Start the next sub-task segment at the next frame |
-| Right | Right Arrow | Save the current take and continue to the next episode |
-
-The Right pedal ends the current phase. Press it once while recording to enter
-the reset phase, reposition the scene, then press it again to start the next
-episode immediately instead of waiting for the reset timer. A Left press also
-enters reset first, then discards the take and reuses the same episode number.
-
-Segment annotation is enabled by default. Every dataset row contains the dense
-scalar `annotation.segment_id` column. An episode starts in segment `0`; after
-successive Space presses, all following frames hold `1`, `2`, `3`, and so on.
-The first frame with a new value is the exact segment boundary. IDs restart at
-`0` for every episode. A boundary is attached to the next 30 Hz dataset frame
-after the pedal press and does not alter the independent 200 Hz arm-control
-loop. Presses during reset are ignored, and re-recording discards the take's
-segments and restarts their numbering.
-
-Keyboard auto-repeat is filtered by a configurable debounce interval:
-
-```yaml
-annotations:
-  segments: true
-  segment_debounce_ms: 400
+```bash
+PIPER_TELEOP_SPEED_PERCENT=20 \
+PIPER_TELEOP_MAX_RELATIVE_TARGET=5 \
+piper_teleop --init-can --no-rerun
 ```
 
-Use `piper_record --no-segments` to record a dataset without the annotation
-column. Under X11 the `pynput` listener receives the HID pedal globally. Under
-Wayland or a headless terminal, keep the recording terminal focused so the TTY
-fallback receives the keys. `Esc` or `q` still stops the full recording
-session.
+After checking pose and direction, run with the configured defaults.
 
-A successful smoke test at 30 Hz ends with approximately:
-
-```text
-CAPTURE        150 frames / 5.00 s = 30.0 Hz (target 30 Hz)
+```bash
+piper_teleop --init-can
 ```
 
-Common values can also be overridden without editing YAML:
+### Visualization
+
+```bash
+piper_vis
+piper_vis --config ~/piper/configs/teleop.yaml
+```
+
+Press `q` or `Esc` to close the viewer.
+
+### Record
+
+Start with a five-second local smoke test.
+
+```bash
+piper_record --dry-run
+piper_record --init-can --test
+piper_record
+```
+
+Frequently changed values can be overridden from the CLI.
 
 ```bash
 piper_record \
-  --repo-id local/pepper_to_cup \
-  --task "Put the bell pepper in the right cup." \
+  --repo-id local/pick_and_place \
+  --task "Pick the object and place it in the container." \
   --episodes 20 \
   --seconds 60
 ```
 
-Use `--dry-run` to inspect the effective plan, `--no-rerun` to isolate
-visualization overhead, and `NO_COLOR=1` to disable ANSI colors.
+| Input | Action |
+| --- | --- |
+| `Right` / `n` | Save the current episode and continue |
+| `Left` / `r` | Discard and re-record the current episode |
+| `Space` | Start a new segment on the next frame |
+| `Esc` / `q` | Stop recording |
 
-## Timing model
+### Rollout
 
-The control worker relays leader commands at 200 Hz. Dataset rows are sampled on
-a separate 30 Hz absolute schedule. Each RealSense camera continuously captures
-in its own background thread; the recorder snapshots the newest frames and then
-reads follower state for the same row. The local Rerun Viewer receives a raw
-10 Hz preview to avoid the Jetson native Viewer's JPEG decoder path, while the
-stored frames retain their configured capture quality.
-
-This provides software synchronization suitable for standard LeRobot training.
-It does not provide hardware-triggered simultaneous exposure between independent
-RealSense cameras; their physical capture times can differ by up to one camera
-period (about 33 ms at 30 Hz).
-
-## Test
+Checkpoint-specific settings live in `configs/rollouts/*.yaml` profiles.
 
 ```bash
-conda activate lerobot_v060
-HF_HOME=/tmp/lerobot-test-hf \
-HF_LEROBOT_HOME=/tmp/lerobot-test-data \
-pytest -q ~/piper/lerobot_plugins/tests ~/lerobot_v060/tests/test_control_robot.py
+piper_rollout --list-profiles
+cp ~/piper/configs/rollout-profile.example.yaml \
+  ~/piper/configs/rollouts/my_act.yaml
 ```
 
-The integration tests cover high-rate control, foot-pedal segments, plugin
-startup flow, camera sampling, terminal UI, official home reset, guided reset
-annotations, recording, and resume paths.
+Edit the checkpoint, task, and—when needed—camera aliases and startup pose in
+`my_act.yaml`. Always validate in this order:
+
+```bash
+# Files and configuration only
+piper_rollout my_act --dry-run
+
+# One synthetic CUDA inference; no hardware connection
+piper_rollout my_act --check
+
+# Bounded 30-second rollout on the follower
+piper_rollout my_act --init-can
+```
+
+Every live rollout, regardless of policy type, first opens the camera-only
+`piper_vis` reset grid. Press `Enter` after confirming the object setup to
+continue with CAN initialization and rollout, or `q`/`Esc` to cancel without
+enabling the motors. This step is skipped by `--dry-run` and `--check`.
+
+### Replay
+
+Inspect recorded video and action traces before policy debugging.
+
+```bash
+piper_replay --list-profiles
+cp ~/piper/configs/replay-profile.example.yaml \
+  ~/piper/configs/replays/my_dataset.yaml
+piper_replay my_dataset --episode 0
+```
+
+Edit `repo_id` and `root` in `my_dataset.yaml` first. Sending actions to the
+follower requires an explicit `--hardware` flag.
+
+```bash
+piper_replay my_dataset --episode 0 --hardware --dry-run
+piper_replay my_dataset --episode 0 --hardware --init-can
+```
+
+## Configuration
+
+- Shared defaults and profile templates: `configs/*.example.yaml`
+- Machine-local values: `configs/teleop.yaml`, `record.yaml`, `rollout.yaml`, `replay.yaml`
+- Per-checkpoint rollout profiles: `configs/rollouts/*.yaml`
+- Per-dataset replay profiles: `configs/replays/*.yaml`
+
+Machine-local YAML files and CAN mappings are ignored by Git. Keep lab-specific
+values in those local files rather than editing the shared examples.
+
+## Safety and shutdown
+
+- Validate first teleop motion at speed 20% and relative target 5 or lower.
+- Use rollout in the order `--dry-run` → `--check` → hardware run.
+- After `Ctrl-C`, support both arms—especially the follower—and press Enter to release torque.
+- `piper_vis`, `--help`, and rollout `--dry-run`/`--check` do not move motors.
+
+## Update
+
+Update the integration without replacing machine-local configuration.
+
+```bash
+cd ~/piper
+git pull --ff-only
+source ~/piper/scripts/activate_lerobot_v060.sh
+~/piper/scripts/install.sh ~/lerobot_v060
+```
+
+## Common issues
+
+- `no connected gs_usb CAN adapters`: check `sudo modprobe gs_usb`, USB cabling, and `ip -br link`.
+- `REPLACE_WITH_..._SERIAL`: update local YAML using `lerobot-find-cameras realsense`.
+- `torch.cuda.is_available() == False`: install the NVIDIA driver and PyTorch wheel for that machine.
+- Commands missing in a new terminal: source `~/piper/scripts/activate_lerobot_v060.sh` again.
