@@ -81,15 +81,118 @@ def _config(checkpoint: Path) -> dict:
 
 def test_effective_resolves_policy_alias_and_cli_overrides(tmp_path: Path):
     checkpoint = _write_checkpoint(tmp_path)
-    args = rollout_cli._arguments(["act", "--seconds=5", "--speed=20", "--amp"])
+    args = rollout_cli._arguments(
+        ["act", "--seconds=5", "--speed=20", "--n-action-steps=3", "--amp"]
+    )
 
     cfg = rollout_cli._effective(_config(checkpoint), args)
 
     assert cfg["checkpoint"] == checkpoint.resolve()
     assert cfg["duration"] == 5
     assert cfg["speed_percent"] == 20
+    assert cfg["n_action_steps"] == 3
     assert cfg["use_amp"] is True
     assert cfg["align_start"] is True
+
+
+def test_named_profile_merges_policy_and_remaps_camera_names(tmp_path: Path):
+    checkpoint = _write_checkpoint(tmp_path, cameras=("front", "right"))
+    config_path = tmp_path / "rollout.yaml"
+    config_path.write_text(yaml.safe_dump(_config(checkpoint)))
+    profile_dir = tmp_path / "rollouts"
+    profile_dir.mkdir()
+    (profile_dir / "hyu_act.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "profile": {
+                    "description": "Hanyang test profile",
+                    "camera_aliases": {"front": "egoview", "right": "wristcam"},
+                },
+                "policy": {
+                    "default": "hyu_act",
+                    "checkpoints": {"hyu_act": str(checkpoint)},
+                    "n_action_steps": 4,
+                },
+                "rollout": {"task": "place the lemon on the red plate"},
+                "teleop_initial_pose": {
+                    "normalized": {
+                        "joint1": 12.0,
+                        "joint2": -47.0,
+                        "joint3": 40.0,
+                        "joint4": 0.0,
+                        "joint5": 98.0,
+                        "joint6": -4.0,
+                        "gripper": 63.6,
+                    }
+                },
+            }
+        )
+    )
+    args = rollout_cli._arguments(["hyu_act", "--config", str(config_path)])
+
+    cfg = rollout_cli._effective(rollout_cli._load_configuration(args), args)
+    info = rollout_cli._validate(cfg)
+
+    assert cfg["profile_name"] == "hyu_act"
+    assert cfg["policy_label"] == "hyu_act"
+    assert cfg["checkpoint"] == checkpoint.resolve()
+    assert cfg["task"] == "place the lemon on the red plate"
+    assert cfg["n_action_steps"] == 4
+    assert cfg["startup_pose"]["joint5"] == 98.0
+    assert cfg["cameras"] == {
+        "front": "111111111111",
+        "right": "222222222222",
+    }
+    assert info["type"] == "act"
+    assert info["n_action_steps"] == 4
+    assert info["checkpoint_n_action_steps"] == 10
+
+
+def test_explicit_unknown_profile_lists_available_names(tmp_path: Path):
+    checkpoint = _write_checkpoint(tmp_path)
+    config_path = tmp_path / "rollout.yaml"
+    config_path.write_text(yaml.safe_dump(_config(checkpoint)))
+    profile_dir = tmp_path / "rollouts"
+    profile_dir.mkdir()
+    (profile_dir / "sju_act.yaml").write_text("profile: {}\n")
+    args = rollout_cli._arguments(
+        ["--profile", "missing", "--config", str(config_path)]
+    )
+
+    with pytest.raises(ValueError, match="available: sju_act"):
+        rollout_cli._load_configuration(args)
+
+
+def test_list_profiles_does_not_validate_or_connect_hardware(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    config_path = tmp_path / "rollout.yaml"
+    profile_dir = tmp_path / "rollouts"
+    profile_dir.mkdir()
+    (profile_dir / "hyu_act.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "profile": {"description": "Hanyang ACT"},
+                "policy": {
+                    "default": "hyu_act",
+                    "checkpoints": {"hyu_act": "outputs/hyu/act_latest"},
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        rollout_cli,
+        "_preflight_hardware",
+        lambda _cfg: pytest.fail("profile listing touched hardware"),
+    )
+
+    rollout_cli.main(["--config", str(config_path), "--list-profiles"])
+
+    output = capsys.readouterr().out
+    assert "hyu_act" in output
+    assert "Hanyang ACT" in output
 
 
 def test_validate_accepts_matching_act_checkpoint(tmp_path: Path):
@@ -103,11 +206,29 @@ def test_validate_accepts_matching_act_checkpoint(tmp_path: Path):
     assert info["n_action_steps"] == 10
 
 
+def test_validate_rejects_unsupported_policy(tmp_path: Path):
+    checkpoint = _write_checkpoint(tmp_path, policy_type="unsupported")
+    cfg = rollout_cli._effective(_config(checkpoint), rollout_cli._arguments(["act"]))
+
+    with pytest.raises(ValueError, match="supports ACT and Diffusion"):
+        rollout_cli._validate(cfg)
+
+
 def test_validate_rejects_checkpoint_camera_mismatch(tmp_path: Path):
     checkpoint = _write_checkpoint(tmp_path, cameras=("front",))
     cfg = rollout_cli._effective(_config(checkpoint), rollout_cli._arguments(["act"]))
 
     with pytest.raises(ValueError, match="Checkpoint/camera mismatch"):
+        rollout_cli._validate(cfg)
+
+
+def test_validate_rejects_action_steps_larger_than_chunk(tmp_path: Path):
+    checkpoint = _write_checkpoint(tmp_path)
+    data = _config(checkpoint)
+    data["policy"]["n_action_steps"] = 11
+    cfg = rollout_cli._effective(data, rollout_cli._arguments(["act"]))
+
+    with pytest.raises(ValueError, match="cannot exceed checkpoint chunk_size"):
         rollout_cli._validate(cfg)
 
 
@@ -143,7 +264,20 @@ def test_rollout_config_uses_piper_safety_settings(tmp_path: Path):
     assert rollout_cfg.robot.startup_pose_speed_percent == 20
     assert rollout_cfg.robot.startup_pose_timeout_s == 15
     assert rollout_cfg.duration == 10
+    assert rollout_cfg.policy.n_action_steps == 10
     assert rollout_cfg.policy.pretrained_backbone_weights is None
+
+
+def test_rollout_config_applies_action_step_override(tmp_path: Path):
+    checkpoint = _write_checkpoint(tmp_path)
+    data = _config(checkpoint)
+    data["policy"]["n_action_steps"] = 4
+    cfg = rollout_cli._effective(data, rollout_cli._arguments(["act"]))
+
+    rollout_cfg = rollout_cli._rollout_config(cfg)
+
+    assert rollout_cfg.policy.chunk_size == 10
+    assert rollout_cfg.policy.n_action_steps == 4
 
 
 def test_no_align_start_disables_startup_motion(tmp_path: Path):
@@ -182,8 +316,20 @@ def test_realsense_preflight_uses_lerobot_isolated_context(monkeypatch):
 
 def test_main_dry_run_never_checks_or_connects_hardware(tmp_path: Path, monkeypatch, capsys):
     checkpoint = _write_checkpoint(tmp_path)
+    preview_config = tmp_path / "record.yaml"
+    preview_config.write_text(
+        yaml.safe_dump({"cameras": {"egoview": "111111111111"}})
+    )
     config_path = tmp_path / "rollout.yaml"
-    config_path.write_text(yaml.safe_dump(_config(checkpoint)))
+    data = _config(checkpoint)
+    data["rollout"].update(
+        {
+            "setup_preview": True,
+            "setup_preview_config": str(preview_config),
+            "setup_preview_camera": "egoview",
+        }
+    )
+    config_path.write_text(yaml.safe_dump(data))
 
     monkeypatch.setattr(
         rollout_cli,
@@ -195,11 +341,17 @@ def test_main_dry_run_never_checks_or_connects_hardware(tmp_path: Path, monkeypa
         "_rollout_config",
         lambda _cfg: pytest.fail("dry-run built a live rollout"),
     )
+    monkeypatch.setattr(
+        rollout_cli,
+        "_prepare_environment",
+        lambda _cfg: pytest.fail("dry-run opened the setup preview"),
+    )
 
     rollout_cli.main(["act", "--config", str(config_path), "--dry-run"])
 
     output = capsys.readouterr().out
     assert "PIPER ROLLOUT" in output
+    assert "SETUP GRID" in output
     assert "teleop initial pose ON" in output
 
 
@@ -220,3 +372,52 @@ def test_main_requires_yes_for_noninteractive_hardware_rollout(tmp_path: Path, m
         rollout_cli.main(["act", "--config", str(config_path)])
 
     assert exc_info.value.code == 1
+
+
+def test_setup_preview_confirms_before_hardware_preflight_for_any_policy(
+    tmp_path: Path,
+    monkeypatch,
+):
+    checkpoint = _write_checkpoint(tmp_path)
+    preview_config = tmp_path / "record.yaml"
+    preview_config.write_text(
+        yaml.safe_dump({"cameras": {"egoview": "111111111111"}})
+    )
+    config_path = tmp_path / "rollout.yaml"
+    data = _config(checkpoint)
+    data["rollout"].update(
+        {
+            "setup_preview": True,
+            "setup_preview_config": str(preview_config),
+            "setup_preview_camera": "egoview",
+        }
+    )
+    config_path.write_text(yaml.safe_dump(data))
+    calls: list[str] = []
+
+    adapter = SimpleNamespace(
+        checkpoint_info=lambda _cfg, _model_config: {
+            "type": "test-runtime",
+            "model_bytes": 10,
+            "n_action_steps": 1,
+            "plan_detail": "test runtime",
+        },
+        check_inference=lambda _cfg: ([0.0] * 7, 0.1, "cpu"),
+        rollout=lambda _cfg: calls.append("rollout"),
+    )
+    monkeypatch.setattr(rollout_cli, "_runtime_adapter", lambda _cfg: adapter)
+    monkeypatch.setattr(
+        rollout_cli,
+        "_prepare_environment",
+        lambda _cfg: calls.append("prepare") or True,
+    )
+    monkeypatch.setattr(
+        rollout_cli,
+        "_preflight_hardware",
+        lambda _cfg: calls.append("preflight") or "cuda:0 (test)",
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+
+    rollout_cli.main(["act", "--config", str(config_path)])
+
+    assert calls == ["prepare", "preflight", "rollout"]

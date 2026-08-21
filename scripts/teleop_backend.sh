@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PIPER_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+INVOCATION_DIR="$(pwd -P)"
 INIT_CAN=false
 DRY_RUN=false
 TELEOP_CONFIG="${PIPER_TELEOP_CONFIG:-$PIPER_ROOT/configs/teleop.yaml}"
@@ -54,6 +55,12 @@ while (($#)); do
     shift
 done
 
+if [[ "$TELEOP_CONFIG" != /* ]]; then
+    TELEOP_CONFIG="$INVOCATION_DIR/$TELEOP_CONFIG"
+fi
+TELEOP_CONFIG="$(realpath -m -- "$TELEOP_CONFIG")"
+
+# Internal backend for the piper_teleop console entry point.
 # Activates lerobot_v060 and exports the serial-based CAN role mapping.
 source "$PIPER_ROOT/scripts/activate_lerobot_v060.sh"
 
@@ -80,6 +87,10 @@ RERUN="${RERUN_OVERRIDE:-${PIPER_TELEOP_RERUN:-${TELEOP_VALUES[9]}}}"
 RERUN_FPS="${PIPER_TELEOP_RERUN_FPS:-${TELEOP_VALUES[10]}}"
 PLAY_SOUNDS="${PIPER_TELEOP_SOUNDS:-${TELEOP_VALUES[11]}}"
 GRID_CONFIG="${PIPER_TELEOP_GRID_CONFIG:-${PIPER_RECORD_CONFIG:-$TELEOP_CONFIG}}"
+if [[ "$GRID_CONFIG" != /* ]]; then
+    GRID_CONFIG="$INVOCATION_DIR/$GRID_CONFIG"
+fi
+GRID_CONFIG="$(realpath -m -- "$GRID_CONFIG")"
 export LEROBOT_TELEOP_CONSOLE_LEVEL="${LEROBOT_TELEOP_CONSOLE_LEVEL:-WARNING}"
 
 if ! [[ "$LEADER_GRIPPER_FRICTION" =~ ^([1-9]|10)$ ]]; then
@@ -106,9 +117,9 @@ fi
 
 if "$INIT_CAN"; then
     if "$DRY_RUN"; then
-        "$PIPER_ROOT/scripts/can_init" --dry-run
+        "$PIPER_ROOT/scripts/can_init.sh" --dry-run
     else
-        "$PIPER_ROOT/scripts/can_init"
+        "$PIPER_ROOT/scripts/can_init.sh"
     fi
 fi
 

@@ -1,0 +1,26 @@
+# Dataset-specific paths live in configs/replays/*.yaml. The default profile
+# makes `piper_replay` by itself inspect the HYU lemon dataset.
+replay:
+  default_profile: hyu_lemon
+  episode: 0
+  start_frame: 0
+  rate: 1.0
+  hold: true
+  compress_images: true
+
+# These limits apply only when --hardware is explicitly supplied.
+arm:
+  follower_can: can_follower
+  speed_percent: 20
+  max_relative_target: 3
+  gripper_speed_mm_s: 40
+  align_start: true
+  align_speed_percent: 20
+  align_timeout_seconds: 20
+  joint_tolerance_degrees: 2
+  gripper_tolerance_mm: 2
+  return_to_start: true
+  wait_for_support: true
+
+audio:
+  enabled: true

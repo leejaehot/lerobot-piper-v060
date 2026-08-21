@@ -2,8 +2,8 @@ policy:
   default: act
   lerobot_root: ~/lerobot_v060
   checkpoints:
-    act: outputs/policies/piper_cider_100demos/act_c50_vae_100k
-    dp: outputs/policies/piper_cider_100demos/dp_100k
+    act: outputs/policies/sju/act_latest
+    dp: outputs/policies/sju/dp_latest
   device: cuda
   use_amp: false
   use_torch_compile: false
@@ -14,6 +14,10 @@ rollout:
   seconds: 30
   fps: 30
   interpolation_multiplier: 1
+  # Camera-only environment confirmation before CAN/torque activation.
+  setup_preview: true
+  setup_preview_config: ~/piper/configs/record.yaml
+  setup_preview_camera: egoview
   rerun: false
   rerun_compress_images: false
   return_to_start: true

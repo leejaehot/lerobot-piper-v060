@@ -26,7 +26,7 @@ class TeleopSettings:
     play_sounds: bool
 
     def shell_lines(self) -> tuple[str, ...]:
-        """Stable newline-delimited values consumed by piper_teleop.sh."""
+        """Stable newline-delimited values consumed by the teleop backend."""
         return (
             str(self.path),
             self.follower_can,

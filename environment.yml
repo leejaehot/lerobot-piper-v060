@@ -1,0 +1,8 @@
+# Architecture-neutral bootstrap. Runtime versions are constrained separately
+# in constraints.txt; GPU and RealSense wheels remain platform-specific.
+name: lerobot_v060
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.13
+  - pip=26.1.2
