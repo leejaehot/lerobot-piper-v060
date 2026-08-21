@@ -1,0 +1,7 @@
+profile:
+  description: Sejong cider pick-and-place · 100 episodes · 30 Hz
+
+dataset:
+  lerobot_root: ~/lerobot_v060
+  repo_id: leejaehot/piper_singlearm_cider_pnp_100demos_v1
+  root: datasets/sju/piper_singlearm_cider_pnp_100demos_v1

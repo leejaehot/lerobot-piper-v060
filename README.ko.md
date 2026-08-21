@@ -10,6 +10,11 @@ AgileX Piper leader/follower teleoperation, 시각화, 데이터 취득, policy 
 > 연결 시 follower 토크가 켜지며 로봇팔이 움직일 수 있습니다. 두 팔을 지지하고,
 > 작업 공간을 비운 뒤, 비상 정지를 준비한 상태에서 시작하세요.
 
+<p align="center">
+  <img src="docs/assets/piper-tabletop-setup.png" width="100%" alt="세 camera 시점에서 본 Piper tabletop 환경">
+</p>
+<p align="center"><sub>실제 검증한 Sejong 환경: 고정 ego-view와 wrist-view camera를 사용하는 초록색 사이다 캔→흰색 바구니 pick-and-place.</sub></p>
+
 ## 명령어
 
 | 명령 | 용도 | 로봇 연결 |
@@ -35,6 +40,40 @@ AgileX Piper leader/follower teleoperation, 시각화, 데이터 취득, policy 
 > Jetson Linux R38.2.2, Python 3.12.13, PyTorch 2.11.0+cu130입니다. 일반
 > `x86_64` Ubuntu도 같은 LeRobot commit과 Python constraints를 사용하며,
 > PyTorch·TorchVision·RealSense wheel만 장비의 architecture/CUDA에 맞게 설치합니다.
+
+## 공개 데이터와 체크포인트
+
+Dataset과 inference용 checkpoint는
+[Hugging Face의 leejaehot](https://huggingface.co/leejaehot)에 공개되어 있습니다.
+
+| 자산 | Hugging Face 저장소 | Profile |
+| --- | --- | --- |
+| Sejong 100-demo dataset | [`piper_singlearm_cider_pnp_100demos_v1`](https://huggingface.co/datasets/leejaehot/piper_singlearm_cider_pnp_100demos_v1) | `sju_cider` |
+| Sejong ACT | [`piper-act-sejong-v1`](https://huggingface.co/leejaehot/piper-act-sejong-v1) | `sju_act` |
+| Sejong Diffusion Policy | [`piper-dp-sejong-v1`](https://huggingface.co/leejaehot/piper-dp-sejong-v1) | `sju_dp` |
+| Hanyang ACT | [`piper-act-hanyang-v1`](https://huggingface.co/leejaehot/piper-act-hanyang-v1) | `hyu_act` |
+| Hanyang Diffusion Policy | [`piper-dp-hanyang-v1`](https://huggingface.co/leejaehot/piper-dp-hanyang-v1) | `hyu_dp` |
+
+환경을 활성화한 뒤, 검증한 Hub revision을 profile이 기대하는 경로에 바로
+다운로드할 수 있습니다.
+
+```bash
+hf download leejaehot/piper_singlearm_cider_pnp_100demos_v1 \
+  --type dataset --revision 7519cf4c5adb36d61ee9f170bab071898c070ac6 \
+  --local-dir ~/lerobot_v060/datasets/sju/piper_singlearm_cider_pnp_100demos_v1
+hf download leejaehot/piper-act-sejong-v1 \
+  --revision 87501bcd60f08c53fab73352330348d9e1fc2cc3 \
+  --local-dir ~/lerobot_v060/outputs/policies/sju/act_latest
+hf download leejaehot/piper-dp-sejong-v1 \
+  --revision cdd73098006510ad8ba8be1643130a2d3df820e5 \
+  --local-dir ~/lerobot_v060/outputs/policies/sju/dp_latest
+hf download leejaehot/piper-act-hanyang-v1 \
+  --revision 66f047b25fb608058ac8c08cb0d33d75b483d7e2 \
+  --local-dir ~/lerobot_v060/outputs/policies/hyu/act_latest
+hf download leejaehot/piper-dp-hanyang-v1 \
+  --revision 955d55e152dee4d0fd638548e6b9588d27f84760 \
+  --local-dir ~/lerobot_v060/outputs/policies/hyu/dp_latest
+```
 
 ## QuickStart
 
@@ -245,6 +284,7 @@ Dataset을 먼저 영상과 action trace로 확인합니다.
 
 ```bash
 piper_replay --list-profiles
+piper_replay sju_cider --episode 0
 cp ~/piper/configs/replay-profile.example.yaml \
   ~/piper/configs/replays/my_dataset.yaml
 piper_replay my_dataset --episode 0

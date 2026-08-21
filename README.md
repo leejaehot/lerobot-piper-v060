@@ -9,6 +9,11 @@ and policy rollout for [LeRobot v0.6.0](https://github.com/huggingface/lerobot/t
 > Connecting enables follower torque and may move the arm. Support both arms,
 > clear the workspace, and keep the emergency stop ready before starting.
 
+<p align="center">
+  <img src="docs/assets/piper-tabletop-setup.png" width="100%" alt="Piper tabletop setup from three camera viewpoints">
+</p>
+<p align="center"><sub>Hardware-validated Sejong setup: fixed ego-view and wrist-view cameras for green-cider-to-white-container pick-and-place.</sub></p>
+
 ## Commands
 
 | Command | Purpose | Hardware |
@@ -35,6 +40,40 @@ and policy rollout for [LeRobot v0.6.0](https://github.com/huggingface/lerobot/t
 > 2.11.0+cu130. Standard `x86_64` Ubuntu uses the same LeRobot commit and Python
 > constraints; only the PyTorch, TorchVision, and RealSense wheels are selected
 > for that machine's architecture and CUDA stack.
+
+## Public assets
+
+Datasets and inference-ready checkpoints are published under
+[leejaehot on Hugging Face](https://huggingface.co/leejaehot).
+
+| Asset | Hugging Face repository | Profile |
+| --- | --- | --- |
+| Sejong 100-demo dataset | [`piper_singlearm_cider_pnp_100demos_v1`](https://huggingface.co/datasets/leejaehot/piper_singlearm_cider_pnp_100demos_v1) | `sju_cider` |
+| Sejong ACT | [`piper-act-sejong-v1`](https://huggingface.co/leejaehot/piper-act-sejong-v1) | `sju_act` |
+| Sejong Diffusion Policy | [`piper-dp-sejong-v1`](https://huggingface.co/leejaehot/piper-dp-sejong-v1) | `sju_dp` |
+| Hanyang ACT | [`piper-act-hanyang-v1`](https://huggingface.co/leejaehot/piper-act-hanyang-v1) | `hyu_act` |
+| Hanyang Diffusion Policy | [`piper-dp-hanyang-v1`](https://huggingface.co/leejaehot/piper-dp-hanyang-v1) | `hyu_dp` |
+
+Download the tested revisions directly into the paths expected by the bundled
+profiles. These commands can be run after activating the environment.
+
+```bash
+hf download leejaehot/piper_singlearm_cider_pnp_100demos_v1 \
+  --type dataset --revision 7519cf4c5adb36d61ee9f170bab071898c070ac6 \
+  --local-dir ~/lerobot_v060/datasets/sju/piper_singlearm_cider_pnp_100demos_v1
+hf download leejaehot/piper-act-sejong-v1 \
+  --revision 87501bcd60f08c53fab73352330348d9e1fc2cc3 \
+  --local-dir ~/lerobot_v060/outputs/policies/sju/act_latest
+hf download leejaehot/piper-dp-sejong-v1 \
+  --revision cdd73098006510ad8ba8be1643130a2d3df820e5 \
+  --local-dir ~/lerobot_v060/outputs/policies/sju/dp_latest
+hf download leejaehot/piper-act-hanyang-v1 \
+  --revision 66f047b25fb608058ac8c08cb0d33d75b483d7e2 \
+  --local-dir ~/lerobot_v060/outputs/policies/hyu/act_latest
+hf download leejaehot/piper-dp-hanyang-v1 \
+  --revision 955d55e152dee4d0fd638548e6b9588d27f84760 \
+  --local-dir ~/lerobot_v060/outputs/policies/hyu/dp_latest
+```
 
 ## Quick start
 
@@ -247,6 +286,7 @@ Inspect recorded video and action traces before policy debugging.
 
 ```bash
 piper_replay --list-profiles
+piper_replay sju_cider --episode 0
 cp ~/piper/configs/replay-profile.example.yaml \
   ~/piper/configs/replays/my_dataset.yaml
 piper_replay my_dataset --episode 0
